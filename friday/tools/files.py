@@ -5,10 +5,14 @@ from pathlib import Path
 
 from .base import Risk, Tool, ToolResult
 
+_MAX_WRITE = 5_000_000  # 5 MB cap on a single write
+
 
 def _resolve(workspace: Path, rel: str) -> Path:
     """Resolve a path and refuse to escape the workspace sandbox."""
-    target = (workspace / rel).resolve()
+    if rel is None or str(rel).strip() == "":
+        raise ValueError("empty path")
+    target = (workspace / str(rel)).resolve()
     if workspace not in target.parents and target != workspace:
         raise ValueError(f"path '{rel}' is outside the workspace sandbox")
     return target
@@ -20,7 +24,12 @@ def make_file_tools(workspace: Path) -> list[Tool]:
             target = _resolve(workspace, path)
             if not target.is_file():
                 return ToolResult(f"No such file: {path}", is_error=True)
-            text = target.read_text(encoding="utf-8", errors="replace")
+            raw = target.read_bytes()
+            if b"\x00" in raw[:4096]:
+                return ToolResult(
+                    f"'{path}' looks like a binary file; not reading it as text.", is_error=True
+                )
+            text = raw.decode("utf-8", errors="replace")
             if len(text) > 60_000:
                 text = text[:60_000] + "\n... [truncated]"
             return ToolResult(text)
@@ -29,6 +38,12 @@ def make_file_tools(workspace: Path) -> list[Tool]:
 
     def write_file(path: str, content: str) -> ToolResult:
         try:
+            if content is None:
+                content = ""
+            if len(content) > _MAX_WRITE:
+                return ToolResult(
+                    f"Refusing to write {len(content)} bytes (cap {_MAX_WRITE}).", is_error=True
+                )
             target = _resolve(workspace, path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")

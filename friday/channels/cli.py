@@ -70,10 +70,17 @@ def run_cli(config: Config) -> None:
                 console.print(Panel(memory.context_blob(), title="memory", border_style="magenta"))
                 continue
 
-            with console.status("[cyan]thinking...[/cyan]"):
-                reply = agent.send(user)
+            try:
+                with console.status("[cyan]thinking...[/cyan]"):
+                    reply = agent.send(user)
+            except KeyboardInterrupt:
+                console.print("[dim](interrupted)[/dim]")
+                continue
             console.print("[bold cyan]friday ›[/bold cyan]")
-            console.print(Markdown(reply))
+            try:
+                console.print(Markdown(reply))
+            except Exception:  # noqa: BLE001 — never let rendering crash the chat
+                console.print(reply)
     finally:
         memory.close()
         console.print("[dim]Friday signing off.[/dim]")

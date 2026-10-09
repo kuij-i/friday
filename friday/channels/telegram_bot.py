@@ -30,6 +30,7 @@ from telegram.ext import (
 from ..agent import Agent
 from ..config import Config
 from ..memory import Memory
+from ..scheduler import Scheduler
 from ..tools.base import Risk
 from ..transcribe import Transcriber
 
@@ -43,7 +44,10 @@ class TelegramFriday:
         self.owner_id: int | None = int(config.telegram_owner_id) if config.telegram_owner_id else None
         self._agents: dict[int, Agent] = {}
         self._trust: dict[int, bool] = {}
+        self._chat_locks: dict[int, asyncio.Lock] = {}
         self._transcriber = Transcriber(config.whisper_model)
+        self._scheduler: Scheduler | None = None
+        self._app: Application | None = None
 
     # ── authorization ──────────────────────────────────────────────────
     def _authorized(self, update: Update) -> bool:
@@ -118,18 +122,42 @@ class TelegramFriday:
         n = self.memory.clear_channel(f"tg:{update.effective_chat.id}")
         await update.message.reply_text(f"Cleared {n} messages.")
 
+    def _lock_for(self, chat_id: int) -> asyncio.Lock:
+        lock = self._chat_locks.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._chat_locks[chat_id] = lock
+        return lock
+
     async def _respond(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str) -> None:
         chat_id = update.effective_chat.id
-        await ctx.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        agent = self._agent_for(chat_id)
-        try:
-            reply = await asyncio.to_thread(agent.send, text)
-        except Exception as e:  # noqa: BLE001
-            log.exception("agent error")
-            reply = f"Something went wrong: {e}"
+        # One turn at a time per chat, so rapid messages don't interleave.
+        async with self._lock_for(chat_id):
+            await ctx.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            agent = self._agent_for(chat_id)
+            try:
+                reply = await asyncio.to_thread(agent.send, text)
+            except Exception as e:  # noqa: BLE001 — agent.send already guards, belt-and-braces
+                log.exception("agent error")
+                reply = f"Something went wrong: {e}"
+        reply = reply or "(no reply)"
         # Telegram messages cap at 4096 chars.
-        for i in range(0, len(reply) or 1, 4000):
-            await update.message.reply_text(reply[i : i + 4000] or "(no reply)")
+        for i in range(0, len(reply), 4000):
+            try:
+                await update.message.reply_text(reply[i : i + 4000])
+            except Exception:  # noqa: BLE001
+                log.exception("failed to send reply chunk")
+
+    async def _deliver(self, channel: str, text: str) -> None:
+        """Scheduler delivery: channel is 'tg:<chat_id>'."""
+        if not channel.startswith("tg:"):
+            return
+        try:
+            chat_id = int(channel.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return
+        for i in range(0, len(text) or 1, 4000):
+            await self._app.bot.send_message(chat_id=chat_id, text=text[i : i + 4000] or " ")
 
     async def on_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -167,17 +195,54 @@ class TelegramFriday:
         await update.message.reply_text(f"🎙 heard: {text}")
         await self._respond(update, ctx, text)
 
+    async def _on_startup(self, _app: Application) -> None:
+        self._scheduler = Scheduler(self.memory, self._deliver)
+        self._scheduler.start()
+
+    async def _on_shutdown(self, _app: Application) -> None:
+        if self._scheduler:
+            await self._scheduler.stop()
+        self.memory.close()
+
     def build(self) -> Application:
-        app = Application.builder().token(self.config.telegram_token).build()
+        app = (
+            Application.builder()
+            .token(self.config.telegram_token)
+            .post_init(self._on_startup)
+            .post_shutdown(self._on_shutdown)
+            .build()
+        )
+        self._app = app
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("trust_on", self.trust_on))
         app.add_handler(CommandHandler("trust_off", self.trust_off))
         app.add_handler(CommandHandler("status", self.status))
         app.add_handler(CommandHandler("memory", self.memory_cmd))
         app.add_handler(CommandHandler("reset", self.reset))
+        app.add_handler(CommandHandler("reminders", self.reminders_cmd))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message))
         app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self.on_voice))
+        app.add_error_handler(self._on_error)
         return app
+
+    async def _on_error(self, _update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        log.error("telegram handler error", exc_info=ctx.error)
+
+    async def reminders_cmd(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+        items = self.memory.list_reminders(f"tg:{update.effective_chat.id}")
+        if not items:
+            await update.message.reply_text("No active reminders.")
+            return
+        import time as _t
+
+        lines = []
+        for r in items:
+            when = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(r["next_run"]))
+            kind = f"every {r['interval'] / 60:.0f}m" if r["interval"] else "once"
+            lines.append(f"#{r['id']}  {when}  ({kind})  {r['text']}")
+        await update.message.reply_text("\n".join(lines)[:3900])
 
 
 def run_telegram(config: Config) -> None:

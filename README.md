@@ -80,7 +80,16 @@ Friday runs on *your* machine with *your* permissions, so the guardrails matter:
 4. Open your bot in Telegram, send `/start`, and chat. Install the Telegram app
    on your iPhone and you can reach Friday from anywhere your machine is online.
 
-Useful Telegram commands: `/trust_on`, `/trust_off`, `/status`, `/memory`, `/reset`.
+Useful Telegram commands: `/trust_on`, `/trust_off`, `/status`, `/memory`,
+`/reminders`, `/reset`.
+
+### Reminders & recurring nudges
+
+Ask Friday things like "remind me to stretch in 25 minutes" or "every morning
+at 08:30 tell me to review my inbox". It stores the reminder and the Telegram
+bridge delivers it when due (one-off or recurring). See `/reminders` to list
+them. Delivery runs inside `python run.py telegram`, so keep that running (the
+auto-start task below does exactly that).
 
 ### Voice notes (talk to Friday hands-free)
 
@@ -119,13 +128,14 @@ friday/
   memory.py            SQLite memory (facts / preferences / history)
   agent.py             Claude tool-use loop + approval gate
   prompts.py           system prompt builder
-  tools/               files, shell, python, memory, security tools
+  tools/               files, shell, python, memory, security, schedule, selfcode
   transcribe.py        optional local speech-to-text for voice notes
+  scheduler.py         async reminder delivery loop (runs in the Telegram bridge)
   channels/            cli.py and telegram_bot.py
-  selfimprove/         phase-2 guarded self-coding scaffold
+  selfimprove/         phase-2 guarded self-coding (proposer)
 run.py                 entrypoint: cli | telegram | doctor
 scripts/               Windows auto-start (scheduled task) helpers
-tests/                 pytest suite
+tests/                 pytest suite (network-free; agent uses a fake client)
 ```
 
 Web search uses Claude's server-side `web_search` tool (toggle with
@@ -135,10 +145,12 @@ Web search uses Claude's server-side `web_search` tool (toggle with
 
 - **Phase 1 — memory (done).** Friday remembers facts and preferences across
   sessions and uses them automatically. Teach it with "remember that …".
-- **Phase 2 — guarded self-coding (scaffolded, off by default).** See
-  `friday/selfimprove/proposer.py`. The intended loop: Friday proposes a diff to
-  its own source → it lands on a `friday/self-improve-*` git branch → tests run →
-  you review `git diff` and merge by hand. Wire it in only once you trust it.
+- **Phase 2 — guarded self-coding (built, off by default).** Set
+  `FRIDAY_SELF_CODING=true` to give Friday the `propose_self_change` tool. It
+  proposes a unified diff to its own source → the change lands on a fresh
+  `friday/self-improve-*` git branch → the test suite runs → you review
+  `git diff` and merge by hand. It is a DANGEROUS tool (approval-gated) and
+  **never merges automatically**. Keep it off until you trust it.
 
 ## Tests
 

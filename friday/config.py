@@ -32,6 +32,8 @@ class Config:
     enable_web_search: bool = field(default_factory=lambda: _as_bool(os.getenv("FRIDAY_WEB_SEARCH"), True))
     web_search_max_uses: int = field(default_factory=lambda: int(os.getenv("FRIDAY_WEB_SEARCH_MAX_USES", "5")))
     whisper_model: str = field(default_factory=lambda: os.getenv("FRIDAY_WHISPER_MODEL", "base"))
+    enable_self_coding: bool = field(default_factory=lambda: _as_bool(os.getenv("FRIDAY_SELF_CODING"), False))
+    repo_root: Path = field(default_factory=lambda: Path(os.getenv("FRIDAY_REPO_ROOT", ".")).resolve())
     workspace: Path = field(default_factory=lambda: Path(os.getenv("FRIDAY_WORKSPACE", "./workspace")).resolve())
     db_path: Path = field(default_factory=lambda: Path(os.getenv("FRIDAY_DB", "./data/friday.db")).resolve())
 

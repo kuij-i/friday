@@ -20,6 +20,8 @@ def doctor() -> None:
     print(f"workspace:  {config.workspace}")
     print(f"database:   {config.db_path}")
     print(f"auto_approve: {config.auto_approve}")
+    print(f"web_search: {config.enable_web_search}")
+    print(f"self_coding: {config.enable_self_coding}")
     print(f"telegram:   {'configured' if config.telegram_token else 'not set'}")
     problems = config.validate()
     if problems:

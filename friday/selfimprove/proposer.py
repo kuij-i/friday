@@ -14,6 +14,7 @@ not something that happens on day one. That is what "guarded" means.
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,7 @@ class SelfImprover:
             cwd=str(self.repo_root),
             capture_output=True,
             text=True,
+            timeout=60,
         )
 
     def stage_proposal(self, proposal: Proposal) -> dict[str, str]:
@@ -44,6 +46,11 @@ class SelfImprover:
         Returns a report dict. Does NOT merge. Leaves you on the new branch with
         the change applied so you can inspect `git diff main` and decide.
         """
+        inside = self._git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0:
+            return {"ok": "false", "stage": "precheck",
+                    "error": "repo_root is not a git working tree"}
+
         branch = f"friday/self-improve-{int(time.time())}"
         created = self._git("checkout", "-b", branch)
         if created.returncode != 0:
@@ -56,19 +63,27 @@ class SelfImprover:
         if applied.returncode != 0:
             return {"ok": "false", "stage": "apply", "branch": branch, "error": applied.stderr}
 
-        tests = subprocess.run(
-            ["python", "-m", "pytest", "-q"],
-            cwd=str(self.repo_root),
-            capture_output=True,
-            text=True,
-        )
+        try:
+            tests = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q"],
+                cwd=str(self.repo_root),
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            test_rc = tests.returncode
+            test_out = (tests.stdout + tests.stderr)[-4000:]
+        except subprocess.TimeoutExpired:
+            test_rc, test_out = 1, "pytest timed out after 600s"
+        except FileNotFoundError:
+            test_rc, test_out = 1, "pytest not available"
         return {
-            "ok": "true" if tests.returncode == 0 else "false",
+            "ok": "true" if test_rc == 0 else "false",
             "stage": "tested",
             "branch": branch,
             "title": proposal.title,
             "rationale": proposal.rationale,
-            "test_output": (tests.stdout + tests.stderr)[-4000:],
+            "test_output": test_out,
             "next_step": (
                 f"Review with: git diff main..{branch}\n"
                 f"Approve with: git checkout main && git merge {branch}\n"
