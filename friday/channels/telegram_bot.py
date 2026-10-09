@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from telegram import Update
@@ -29,6 +31,7 @@ from ..agent import Agent
 from ..config import Config
 from ..memory import Memory
 from ..tools.base import Risk
+from ..transcribe import Transcriber
 
 log = logging.getLogger("friday.telegram")
 
@@ -40,6 +43,7 @@ class TelegramFriday:
         self.owner_id: int | None = int(config.telegram_owner_id) if config.telegram_owner_id else None
         self._agents: dict[int, Agent] = {}
         self._trust: dict[int, bool] = {}
+        self._transcriber = Transcriber(config.whisper_model)
 
     # ── authorization ──────────────────────────────────────────────────
     def _authorized(self, update: Update) -> bool:
@@ -114,13 +118,9 @@ class TelegramFriday:
         n = self.memory.clear_channel(f"tg:{update.effective_chat.id}")
         await update.message.reply_text(f"Cleared {n} messages.")
 
-    async def on_message(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            await update.message.reply_text("Not authorized.")
-            return
+    async def _respond(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str) -> None:
         chat_id = update.effective_chat.id
-        text = update.message.text or ""
-        await _ctx.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await ctx.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         agent = self._agent_for(chat_id)
         try:
             reply = await asyncio.to_thread(agent.send, text)
@@ -131,6 +131,42 @@ class TelegramFriday:
         for i in range(0, len(reply) or 1, 4000):
             await update.message.reply_text(reply[i : i + 4000] or "(no reply)")
 
+    async def on_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            await update.message.reply_text("Not authorized.")
+            return
+        await self._respond(update, ctx, update.message.text or "")
+
+    async def on_voice(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            await update.message.reply_text("Not authorized.")
+            return
+        if not self._transcriber.available():
+            await update.message.reply_text(
+                "Voice needs local transcription. Install it with:\n"
+                "pip install -r requirements-voice.txt"
+            )
+            return
+        voice = update.message.voice or update.message.audio
+        await ctx.bot.send_chat_action(
+            chat_id=update.effective_chat.id, action=ChatAction.TYPING
+        )
+        try:
+            tg_file = await ctx.bot.get_file(voice.file_id)
+            with tempfile.TemporaryDirectory() as tmp:
+                audio_path = Path(tmp) / "note.ogg"
+                await tg_file.download_to_drive(str(audio_path))
+                text = await asyncio.to_thread(self._transcriber.transcribe, audio_path)
+        except Exception as e:  # noqa: BLE001
+            log.exception("transcription error")
+            await update.message.reply_text(f"Couldn't transcribe that: {e}")
+            return
+        if not text:
+            await update.message.reply_text("I couldn't make out any speech in that note.")
+            return
+        await update.message.reply_text(f"🎙 heard: {text}")
+        await self._respond(update, ctx, text)
+
     def build(self) -> Application:
         app = Application.builder().token(self.config.telegram_token).build()
         app.add_handler(CommandHandler("start", self.start))
@@ -140,6 +176,7 @@ class TelegramFriday:
         app.add_handler(CommandHandler("memory", self.memory_cmd))
         app.add_handler(CommandHandler("reset", self.reset))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message))
+        app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self.on_voice))
         return app
 
 

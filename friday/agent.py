@@ -39,6 +39,19 @@ class Agent:
         self.client = anthropic.Anthropic(api_key=config.anthropic_api_key)
         self.registry: ToolRegistry = build_registry(config.workspace, memory)
 
+    def _tool_params(self) -> list[dict[str, Any]]:
+        """Client tools (registry) plus any enabled server-side tools."""
+        tools: list[dict[str, Any]] = list(self.registry.api_schemas())
+        if self.config.enable_web_search:
+            tools.append(
+                {
+                    "type": "web_search_20260209",
+                    "name": "web_search",
+                    "max_uses": self.config.web_search_max_uses,
+                }
+            )
+        return tools
+
     # ── tool execution with the approval gate ──────────────────────────
     def _execute_tool(self, name: str, tool_input: dict[str, Any]) -> tuple[str, bool]:
         tool = self.registry.get(name)
@@ -87,7 +100,7 @@ class Agent:
                 model=self.config.model,
                 max_tokens=16000,
                 system=system,
-                tools=self.registry.api_schemas(),
+                tools=self._tool_params(),
                 thinking={"type": "adaptive"},
                 output_config={"effort": self.config.effort},
                 messages=messages,
@@ -114,7 +127,8 @@ class Agent:
                 final_text = step_text
                 break
 
-            # Execute tool calls, feed results back.
+            # Execute client tool calls, feed results back. Server tools (e.g.
+            # web_search) run on Anthropic's side and need no local handling.
             messages.append({"role": "assistant", "content": response.content})
             tool_results = []
             for block in response.content:
@@ -128,6 +142,10 @@ class Agent:
                             "is_error": is_error,
                         }
                     )
+            if not tool_results:
+                # Only server-side tools ran; nothing to return. Take the text.
+                final_text = step_text
+                break
             messages.append({"role": "user", "content": tool_results})
         else:
             final_text = (

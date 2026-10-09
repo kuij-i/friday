@@ -1,0 +1,4 @@
+# Optional: local speech-to-text for Telegram voice notes.
+# Install with:  pip install -r requirements-voice.txt
+# On Windows you may also need ffmpeg on PATH (https://www.gyan.dev/ffmpeg/builds/).
+faster-whisper>=1.0

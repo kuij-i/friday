@@ -7,9 +7,10 @@ remembers what matters, and answers from your iPhone over Telegram.
 - **Brain:** Claude (`claude-opus-5-5`) via the Anthropic API.
 - **Memory:** a local SQLite store of facts, preferences, and conversation —
   this is phase-1 self-improvement: Friday gets more useful the more you use it.
-- **Tools:** files, shell, Python, local system/security inspection — every
-  side-effecting action is gated behind your approval.
-- **Reach it anywhere:** a desktop CLI and a Telegram bot for your phone.
+- **Tools:** files, shell, Python, local system/security inspection, and live
+  web search — every side-effecting action is gated behind your approval.
+- **Reach it anywhere:** a desktop CLI and a Telegram bot for your phone, with
+  voice-note support (speak to Friday; transcription stays on your machine).
 - **Self-coding (phase 2, scaffolded):** Friday can propose changes to its own
   code, but only onto a git branch, with tests, for you to review and merge.
 
@@ -81,12 +82,34 @@ Friday runs on *your* machine with *your* permissions, so the guardrails matter:
 
 Useful Telegram commands: `/trust_on`, `/trust_off`, `/status`, `/memory`, `/reset`.
 
+### Voice notes (talk to Friday hands-free)
+
+Send a Telegram voice message and Friday transcribes it locally (no audio
+leaves your machine) and answers. This needs the optional speech-to-text extra:
+
+```powershell
+pip install -r requirements-voice.txt
+```
+
+On Windows you may also need [ffmpeg](https://www.gyan.dev/ffmpeg/builds/) on
+your PATH. Pick accuracy vs. speed with `FRIDAY_WHISPER_MODEL` in `.env`
+(`tiny`/`base`/`small`/`medium`/`large-v3`). Without the extra installed, voice
+notes get a friendly "install this to enable voice" reply instead of failing.
+
 ## Keeping Friday running in the background (Windows)
 
-For always-on access from your phone, run the Telegram bridge via **Task
-Scheduler**: create a task that runs at logon, action
-`...\friday\.venv\Scripts\python.exe` with argument `run.py telegram` and "Start
-in" set to the friday folder. (A proper Windows service via NSSM also works.)
+For always-on access from your phone, register the Telegram bridge as a
+scheduled task that starts at logon and restarts if it stops. From the repo
+root in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1
+Start-ScheduledTask -TaskName Friday    # start it now, without waiting for logon
+```
+
+Remove it later with `Unregister-ScheduledTask -TaskName Friday -Confirm:$false`.
+The task runs `scripts\start-friday.ps1`, which activates your `.venv` and
+launches `run.py telegram`.
 
 ## Project layout
 
@@ -97,11 +120,16 @@ friday/
   agent.py             Claude tool-use loop + approval gate
   prompts.py           system prompt builder
   tools/               files, shell, python, memory, security tools
+  transcribe.py        optional local speech-to-text for voice notes
   channels/            cli.py and telegram_bot.py
   selfimprove/         phase-2 guarded self-coding scaffold
 run.py                 entrypoint: cli | telegram | doctor
+scripts/               Windows auto-start (scheduled task) helpers
 tests/                 pytest suite
 ```
+
+Web search uses Claude's server-side `web_search` tool (toggle with
+`FRIDAY_WEB_SEARCH`); no extra API key needed.
 
 ## Self-improvement roadmap
 
