@@ -1,0 +1,51 @@
+"""Configuration loaded from environment / .env file."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # dotenv is optional at runtime
+    pass
+
+
+def _as_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass
+class Config:
+    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
+    model: str = field(default_factory=lambda: os.getenv("FRIDAY_MODEL", "claude-opus-5-5"))
+    effort: str = field(default_factory=lambda: os.getenv("FRIDAY_EFFORT", "high"))
+
+    telegram_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
+    telegram_owner_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_OWNER_ID", ""))
+
+    auto_approve: bool = field(default_factory=lambda: _as_bool(os.getenv("FRIDAY_AUTO_APPROVE"), False))
+    workspace: Path = field(default_factory=lambda: Path(os.getenv("FRIDAY_WORKSPACE", "./workspace")).resolve())
+    db_path: Path = field(default_factory=lambda: Path(os.getenv("FRIDAY_DB", "./data/friday.db")).resolve())
+
+    # Max tool-use iterations per user turn (keeps runaway loops bounded).
+    max_iterations: int = 40
+
+    def ensure_dirs(self) -> None:
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def validate(self) -> list[str]:
+        problems: list[str] = []
+        if not self.anthropic_api_key:
+            problems.append("ANTHROPIC_API_KEY is not set (copy .env.example to .env and fill it in).")
+        if self.effort not in {"low", "medium", "high", "xhigh", "max"}:
+            problems.append(f"FRIDAY_EFFORT '{self.effort}' is invalid; use low|medium|high|xhigh|max.")
+        return problems
+
+
+config = Config()

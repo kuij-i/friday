@@ -1,0 +1,23 @@
+# Secrets & local config
+.env
+
+# Friday's runtime state
+data/
+workspace/
+*.db
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,5 @@
+anthropic>=0.69
+python-telegram-bot>=21.0
+python-dotenv>=1.0
+rich>=13.7
+psutil>=5.9
