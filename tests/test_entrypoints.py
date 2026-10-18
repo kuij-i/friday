@@ -78,3 +78,20 @@ def test_telegram_app_builds_offline(tmp_path):
 def test_run_py_shim_exists():
     root = Path(__file__).resolve().parents[1]
     assert "friday.__main__" in (root / "run.py").read_text()
+
+
+def test_telegram_preflight_leaves_a_usable_event_loop(monkeypatch):
+    # Older python-telegram-bot calls asyncio.get_event_loop() in run_polling,
+    # which raises after a bare asyncio.run() on Python 3.12+.
+    import asyncio
+
+    from friday.channels import telegram_bot
+
+    async def fake_check(_token):
+        return "friday_test_bot"
+
+    monkeypatch.setattr(telegram_bot, "_check_token", fake_check)
+    assert telegram_bot.preflight("123:abc") == "friday_test_bot"
+    loop = asyncio.get_event_loop()
+    assert not loop.is_closed()
+    loop.close()

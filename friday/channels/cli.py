@@ -18,6 +18,7 @@ from ..memory import Memory
 from ..tools.base import Risk
 
 console = Console()
+err_console = Console(stderr=True)
 
 # The "thinking..." spinner, paused while an approval prompt is on screen.
 _status: Status | None = None
@@ -75,14 +76,14 @@ def run_cli(config: Config) -> int:
     problems = config.validate()
     if problems:
         for p in problems:
-            console.print(Text.assemble(("config error: ", "red"), p))
-        console.print("Run [bold]python run.py doctor[/bold] after fixing your .env.")
+            err_console.print(Text.assemble(("config error: ", "red"), p))
+        err_console.print("Run [bold]python run.py doctor[/bold] after fixing your .env.")
         return 1
     try:
         config.ensure_dirs()
         memory = Memory(config.db_path)
     except Exception as e:  # noqa: BLE001 — unwritable dir, corrupt DB, ...
-        console.print(Text.assemble(("startup error: ", "red"), f"can't open {config.db_path}: {e}"))
+        err_console.print(Text.assemble(("startup error: ", "red"), f"can't open {config.db_path}: {e}"))
         return 1
     agent = Agent(config, memory, channel="cli", approver=_cli_approver, activity_hook=_show_activity)
 

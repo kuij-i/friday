@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -321,8 +322,8 @@ def run_telegram(config: Config) -> int:
         problems.append("TELEGRAM_BOT_TOKEN is not set — create a bot with @BotFather.")
     if problems:
         for p in problems:
-            print(f"config error: {p}")
-        print("Run `python run.py doctor` after fixing your .env.")
+            print(f"config error: {p}", file=sys.stderr)
+        print("Run `python run.py doctor` after fixing your .env.", file=sys.stderr)
         return 1
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -333,21 +334,34 @@ def run_telegram(config: Config) -> int:
         bot = TelegramFriday(config)
         app = bot.build()
     except Exception as e:  # noqa: BLE001 — unwritable dir, corrupt DB, malformed token
-        print(f"startup error: {e}")
+        print(f"startup error: {e}", file=sys.stderr)
         return 1
     try:
-        username = asyncio.run(_check_token(config.telegram_token))
+        username = preflight(config.telegram_token)
     except InvalidToken:
-        print("Telegram rejected TELEGRAM_BOT_TOKEN — copy it again from @BotFather.")
+        print("Telegram rejected TELEGRAM_BOT_TOKEN — copy it again from @BotFather.", file=sys.stderr)
         bot.memory.close()
         return 1
     except NetworkError as e:
-        print(f"Couldn't reach Telegram ({e}). Check your internet connection and retry.")
+        print(f"Couldn't reach Telegram ({e}). Check your internet connection and retry.", file=sys.stderr)
         bot.memory.close()
         return 1
     print(f"Friday is running as @{username}. Message it on Telegram. Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
     return 0
+
+
+def preflight(token: str) -> str:
+    """Validate the token, then leave a fresh event loop for run_polling.
+
+    asyncio.run() closes its loop and unsets the current one; older
+    python-telegram-bot releases call asyncio.get_event_loop() in run_polling,
+    which then raises "There is no current event loop" on Python 3.12+.
+    """
+    try:
+        return asyncio.run(_check_token(token))
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 async def _check_token(token: str) -> str:
