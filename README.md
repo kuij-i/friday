@@ -183,22 +183,26 @@ you're comfortable reviewing diffs it writes.
 happens silently:
 
 1. Friday writes a unified diff against `FRIDAY_REPO_ROOT`.
-2. The change is applied on a **fresh `friday/self-improve-<timestamp>`
-   branch** — never your current branch.
-3. The test suite runs on that branch and you get a pass/fail report.
-4. **It never merges.** You review and decide:
+2. The change is applied and committed on a **fresh
+   `friday/self-improve-<timestamp>-<id>` branch** inside a temporary git
+   worktree — your checkout is never switched, modified, or staged.
+3. The test suite runs in that worktree and you get a pass/fail report; the
+   worktree is then removed and only the branch remains.
+4. **It never merges.** You review and decide (the report prints the exact
+   branch and base names):
 
    ```powershell
-   git diff main..friday/self-improve-<timestamp>                      # review
-   git checkout main && git merge friday/self-improve-<timestamp>       # accept
-   git checkout main && git branch -D friday/self-improve-<timestamp>   # reject
+   git diff main..friday/self-improve-<id>                      # review
+   git checkout main && git merge friday/self-improve-<id>       # accept
+   git branch -D friday/self-improve-<id>                        # reject
    ```
 
 In the CLI you'll get a `y/N` prompt before it runs; in Telegram the chat must
 be in trust mode (`/trust_on`) first.
 
-**Tip:** commit or stash your working tree before asking Friday to propose a
-change, so the new branch starts from a known-clean state.
+**Note:** the branch starts from your last commit (`HEAD`); uncommitted
+changes in your working tree are not included, so commit first if the
+proposal should build on them.
 
 ## Tests
 

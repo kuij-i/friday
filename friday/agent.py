@@ -10,6 +10,7 @@ Robustness choices:
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -24,7 +25,13 @@ from .tools.base import Approver
 # Optional callback to surface tool activity to a UI: (tool_name, tool_input).
 ActivityHook = Callable[[str, dict[str, Any]], None]
 
+log = logging.getLogger("friday.agent")
+
 _MAX_TOKENS = 16_000
+# Budgets that keep a request inside the context window no matter what was
+# stored earlier: one oversized message or tool result must not wedge a chat.
+_HISTORY_CHAR_BUDGET = 150_000
+_MAX_TOOL_RESULT = 100_000
 
 
 def _auto_approver(_name: str, _input: dict[str, Any], _risk: Risk) -> tuple[bool, str]:
@@ -98,7 +105,10 @@ class Agent:
 
         try:
             result = tool.handler(**tool_input)
-            return result.content, result.is_error
+            content = result.content if isinstance(result.content, str) else str(result.content)
+            if len(content) > _MAX_TOOL_RESULT:
+                content = content[:_MAX_TOOL_RESULT] + "\n... [tool output truncated]"
+            return content or "(no output)", bool(result.is_error)
         except TypeError as e:
             return f"Bad arguments for {name}: {e}", True
         except Exception as e:  # noqa: BLE001
@@ -119,39 +129,61 @@ class Agent:
     def send(self, user_message: str) -> str:
         """Run one user turn to completion, returning Friday's final text.
 
-        Never raises on an API/tool failure — returns a readable message so the
-        calling channel can always reply to the user.
+        Never raises on an API/tool/storage failure — returns a readable
+        message so the calling channel can always reply to the user.
         """
-        user_message = (user_message or "").strip()
+        user_message = str(user_message or "").strip()
         if not user_message:
             return "I didn't catch a message there — try again?"
 
-        self.memory.log_message(self.channel, "user", user_message)
-
-        system = build_system_prompt(self.memory, self.channel)
-        history = self.memory.recent_messages(self.channel, limit=20)
-        messages: list[dict[str, Any]] = [
-            {"role": m["role"], "content": m["content"]} for m in history
-        ]
-        # The API requires the first message to be from the user; a truncated
-        # window could begin with an assistant turn, so drop any leading ones.
-        while messages and messages[0]["role"] != "user":
-            messages.pop(0)
-        if not messages:  # history somehow empty — fall back to this turn
-            messages = [{"role": "user", "content": user_message}]
-
         final_text = ""
         try:
+            self.memory.log_message(self.channel, "user", user_message)
+            system = build_system_prompt(self.memory, self.channel)
+            messages = self._history_messages(user_message)
             final_text = self._run_loop(system, messages)
         except anthropic.APIStatusError as e:
             final_text = self._api_error_text(e)
         except anthropic.APIConnectionError:
             final_text = "I couldn't reach the Claude API — check the network and try again."
         except Exception as e:  # noqa: BLE001 — last-resort guard
+            log.exception("agent turn failed")
             final_text = f"Something went wrong handling that: {e}"
 
-        self.memory.log_message(self.channel, "assistant", final_text)
+        final_text = final_text or "(no response)"
+        try:
+            self.memory.log_message(self.channel, "assistant", final_text)
+        except Exception:  # noqa: BLE001 — still deliver the reply if logging fails
+            log.exception("failed to log assistant message")
         return final_text
+
+    def _history_messages(self, user_message: str) -> list[dict[str, Any]]:
+        """Recent history as API messages, bounded to a character budget."""
+        history = self.memory.recent_messages(self.channel, limit=20)
+        messages: list[dict[str, Any]] = []
+        used = 0
+        # Walk newest → oldest so the budget keeps the most recent context.
+        for m in reversed(history):
+            content = m["content"] or ""
+            if m["role"] not in {"user", "assistant"} or not content.strip():
+                continue
+            room = _HISTORY_CHAR_BUDGET - used
+            if room <= 0:
+                break
+            if len(content) > room:
+                if messages:  # older message doesn't fit; stop here
+                    break
+                content = content[-room:]  # newest message alone is huge: keep its tail
+            messages.append({"role": m["role"], "content": content})
+            used += len(content)
+        messages.reverse()
+        # The API requires the first message to be from the user; a truncated
+        # window could begin with an assistant turn, so drop any leading ones.
+        while messages and messages[0]["role"] != "user":
+            messages.pop(0)
+        if not messages:  # history somehow empty — fall back to this turn
+            messages = [{"role": "user", "content": user_message[-_HISTORY_CHAR_BUDGET:]}]
+        return messages
 
     def _run_loop(self, system: str, messages: list[dict[str, Any]]) -> str:
         final_text = ""

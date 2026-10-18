@@ -6,12 +6,21 @@ from pathlib import Path
 from .base import Risk, Tool, ToolResult
 
 _MAX_WRITE = 5_000_000  # 5 MB cap on a single write
+_MAX_READ_CHARS = 60_000
+_MAX_LIST_ENTRIES = 1_000
 
 
-def _resolve(workspace: Path, rel: str) -> Path:
-    """Resolve a path and refuse to escape the workspace sandbox."""
+def resolve_in_workspace(workspace: Path, rel: str) -> Path:
+    """Resolve a path and refuse to escape the workspace sandbox.
+
+    Symlinks are followed before the check, so a link pointing outside the
+    workspace is rejected too.
+    """
     if rel is None or str(rel).strip() == "":
         raise ValueError("empty path")
+    if "\x00" in str(rel):
+        raise ValueError("path contains a NUL byte")
+    workspace = workspace.resolve()
     target = (workspace / str(rel)).resolve()
     if workspace not in target.parents and target != workspace:
         raise ValueError(f"path '{rel}' is outside the workspace sandbox")
@@ -21,17 +30,21 @@ def _resolve(workspace: Path, rel: str) -> Path:
 def make_file_tools(workspace: Path) -> list[Tool]:
     def read_file(path: str) -> ToolResult:
         try:
-            target = _resolve(workspace, path)
+            target = resolve_in_workspace(workspace, path)
             if not target.is_file():
                 return ToolResult(f"No such file: {path}", is_error=True)
-            raw = target.read_bytes()
+            # Read a bounded prefix so a huge file can't exhaust memory.
+            # UTF-8 is at most 4 bytes/char, so this always covers the char cap.
+            with target.open("rb") as f:
+                raw = f.read(_MAX_READ_CHARS * 4 + 1)
             if b"\x00" in raw[:4096]:
                 return ToolResult(
                     f"'{path}' looks like a binary file; not reading it as text.", is_error=True
                 )
-            text = raw.decode("utf-8", errors="replace")
-            if len(text) > 60_000:
-                text = text[:60_000] + "\n... [truncated]"
+            truncated = len(raw) > _MAX_READ_CHARS * 4
+            text = raw[: _MAX_READ_CHARS * 4].decode("utf-8", errors="replace")
+            if truncated or len(text) > _MAX_READ_CHARS:
+                text = text[:_MAX_READ_CHARS] + "\n... [truncated]"
             return ToolResult(text)
         except Exception as e:  # noqa: BLE001
             return ToolResult(f"read_file error: {e}", is_error=True)
@@ -40,11 +53,13 @@ def make_file_tools(workspace: Path) -> list[Tool]:
         try:
             if content is None:
                 content = ""
+            if not isinstance(content, str):
+                return ToolResult("content must be a string.", is_error=True)
             if len(content) > _MAX_WRITE:
                 return ToolResult(
                     f"Refusing to write {len(content)} bytes (cap {_MAX_WRITE}).", is_error=True
                 )
-            target = _resolve(workspace, path)
+            target = resolve_in_workspace(workspace, path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             return ToolResult(f"Wrote {len(content)} chars to {path}")
@@ -53,14 +68,20 @@ def make_file_tools(workspace: Path) -> list[Tool]:
 
     def list_dir(path: str = ".") -> ToolResult:
         try:
-            target = _resolve(workspace, path)
+            target = resolve_in_workspace(workspace, path)
             if not target.is_dir():
                 return ToolResult(f"Not a directory: {path}", is_error=True)
+            children = sorted(target.iterdir())
             entries = []
-            for p in sorted(target.iterdir()):
-                kind = "dir " if p.is_dir() else "file"
-                size = p.stat().st_size if p.is_file() else ""
+            for p in children[:_MAX_LIST_ENTRIES]:
+                try:
+                    kind = "dir " if p.is_dir() else "file"
+                    size = p.stat().st_size if p.is_file() else ""
+                except OSError:  # broken symlink, permission denied, ...
+                    kind, size = "?   ", ""
                 entries.append(f"{kind}  {p.name}  {size}")
+            if len(children) > _MAX_LIST_ENTRIES:
+                entries.append(f"... and {len(children) - _MAX_LIST_ENTRIES} more")
             return ToolResult("\n".join(entries) or "(empty)")
         except Exception as e:  # noqa: BLE001
             return ToolResult(f"list_dir error: {e}", is_error=True)
