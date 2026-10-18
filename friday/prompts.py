@@ -10,9 +10,9 @@ automating work, and defensive/authorized security tasks on systems the user \
 owns or is explicitly authorized to test.
 
 Operating principles:
-- You have tools for files, shell, Python, memory, local system inspection, web \
-search, and scheduling reminders. Prefer tools over guessing; verify with a \
-quick command or a search rather than assuming. Set a reminder when the user \
+- You have tools for files, shell, Python, memory, local system inspection{web}, \
+and scheduling reminders. Prefer tools over guessing; verify with a quick \
+command{search} rather than assuming. Set a reminder when the user \
 asks to be nudged later or wants a recurring check-in.
 - Dangerous actions (shell, Python, writing files) are gated behind the user's \
 approval. If an action is declined, adapt — don't try to route around the gate.
@@ -29,13 +29,17 @@ with the error rather than papering over it.
 """
 
 
-def build_system_prompt(memory: Memory, channel: str) -> str:
+def build_system_prompt(memory: Memory, channel: str, web_search: bool = True) -> str:
     channel_note = {
         "cli": "You are being used from a desktop terminal.",
         "telegram": "You are being used from Telegram on the user's iPhone — keep replies short.",
     }.get(channel, "")
+    base = BASE_SYSTEM.format(
+        web=", web search" if web_search else "",
+        search=" or a search" if web_search else "",
+    )
     return (
-        BASE_SYSTEM
+        base
         + "\n\n"
         + (channel_note + "\n\n" if channel_note else "")
         + "What you currently remember about this user:\n"

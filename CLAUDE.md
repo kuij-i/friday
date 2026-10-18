@@ -15,6 +15,9 @@ reminder scheduler). This file orients future work.
 - `friday/agent.py` — the agentic tool-use loop. Injectable `client` for tests.
   Never raises to the caller: API/tool failures become readable text. Handles
   `refusal`, `pause_turn`, `max_tokens` continuation, and an iteration cap.
+- `friday/providers.py` — `make_client(config)`: the Anthropic client, or
+  `NvidiaClient`, which mimics `client.messages.create` and translates to
+  NVIDIA's OpenAI-compatible chat API (raises `ProviderError` with user text).
 - `friday/prompts.py` — system prompt (base policy + memory context + channel).
 - `friday/tools/` — each module exposes `make_*_tools(...)` returning `Tool`s
   with a `Risk` level; `build_registry(config, memory, channel)` assembles them.
@@ -41,7 +44,9 @@ reminder scheduler). This file orients future work.
 - Python 3.11+, `from __future__ import annotations` in every module.
 - Keep handlers returning `ToolResult(content, is_error=...)`; never raise out
   of a tool — the agent surfaces errors as tool results.
-- Default model is `claude-opus-5-5`; do not hardcode model strings elsewhere.
+- Default models live in `config.DEFAULT_MODELS` (`claude-opus-5-5` for
+  anthropic, `nvidia/nemotron-3-super-120b-a12b` for nvidia); do not hardcode
+  model strings elsewhere.
 
 ## Dev commands
 

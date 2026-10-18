@@ -44,6 +44,29 @@ def _project_dir() -> Path:
 
 PROJECT_DIR = _project_dir()
 
+PROVIDERS = ("anthropic", "nvidia")
+DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "nvidia": "nvidia/nemotron-3-super-120b-a12b"}
+NVIDIA_DEFAULT_MODEL = DEFAULT_MODELS["nvidia"]
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+
+_PLACEHOLDER_KEYS = {"sk-ant-...", "nvapi-...", "your-api-key"}
+
+
+def _real_key(env: str) -> bool:
+    value = os.getenv(env, "").strip()
+    return bool(value) and value not in _PLACEHOLDER_KEYS
+
+
+def _provider() -> str:
+    """FRIDAY_PROVIDER, or auto: Claude if its key is set, else NVIDIA if that key is."""
+    raw = os.getenv("FRIDAY_PROVIDER", "").strip().lower()
+    if raw and raw != "auto":
+        return raw
+    if not _real_key("ANTHROPIC_API_KEY") and _real_key("NVIDIA_API_KEY"):
+        return "nvidia"
+    return "anthropic"
+
 
 def _path(env: str, default: str) -> Path:
     raw = (os.getenv(env) or "").strip() or default
@@ -69,8 +92,14 @@ def _as_int(value: str | None, default: int | None) -> int | None:
 
 @dataclass
 class Config:
+    provider: str = field(default_factory=_provider)
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "").strip())
-    model: str = field(default_factory=lambda: os.getenv("FRIDAY_MODEL", "").strip() or "claude-opus-5-5")
+    nvidia_api_key: str = field(default_factory=lambda: os.getenv("NVIDIA_API_KEY", "").strip())
+    nvidia_base_url: str = field(
+        default_factory=lambda: os.getenv("NVIDIA_BASE_URL", "").strip() or NVIDIA_BASE_URL
+    )
+    # Empty means "the provider's default" (see `model_name`).
+    model: str = field(default_factory=lambda: os.getenv("FRIDAY_MODEL", "").strip())
     effort: str = field(default_factory=lambda: os.getenv("FRIDAY_EFFORT", "").strip().lower() or "high")
 
     telegram_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", "").strip())
@@ -88,15 +117,34 @@ class Config:
     # Max tool-use iterations per user turn (keeps runaway loops bounded).
     max_iterations: int = 40
 
+    def __post_init__(self) -> None:
+        if not self.model:
+            self.model = DEFAULT_MODELS.get(self.provider, DEFAULT_MODELS["anthropic"])
+
+    @property
+    def web_search_available(self) -> bool:
+        """Web search is Claude's server-side tool; other providers don't have it."""
+        return self.enable_web_search and self.provider == "anthropic"
+
     def ensure_dirs(self) -> None:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def validate(self) -> list[str]:
         problems: list[str] = []
-        if not self.anthropic_api_key:
-            problems.append("ANTHROPIC_API_KEY is not set (copy .env.example to .env and fill it in).")
-        elif self.anthropic_api_key in {"sk-ant-...", "your-api-key"}:
+        if self.provider not in PROVIDERS:
+            problems.append(f"FRIDAY_PROVIDER '{self.provider}' is invalid; use anthropic or nvidia.")
+        elif self.provider == "nvidia":
+            if not self.nvidia_api_key:
+                problems.append("NVIDIA_API_KEY is not set (get one at build.nvidia.com and put it in .env).")
+            elif self.nvidia_api_key in _PLACEHOLDER_KEYS:
+                problems.append("NVIDIA_API_KEY is still the placeholder from .env.example — paste your real key.")
+        elif not self.anthropic_api_key:
+            problems.append(
+                "No API key set: put ANTHROPIC_API_KEY (Claude) or NVIDIA_API_KEY (NVIDIA) in .env "
+                "(copy .env.example to .env first)."
+            )
+        elif self.anthropic_api_key in _PLACEHOLDER_KEYS:
             problems.append("ANTHROPIC_API_KEY is still the placeholder from .env.example — paste your real key.")
         if self.effort not in {"low", "medium", "high", "xhigh", "max"}:
             problems.append(f"FRIDAY_EFFORT '{self.effort}' is invalid; use low|medium|high|xhigh|max.")

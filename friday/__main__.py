@@ -18,12 +18,14 @@ def doctor() -> int:
     from .config import config
 
     print(f"friday:     {__version__} (python {sys.version.split()[0]})")
+    print(f"provider:   {config.provider}")
     print(f"model:      {config.model}")
-    print(f"effort:     {config.effort}")
+    if config.provider == "anthropic":
+        print(f"effort:     {config.effort}")
     print(f"workspace:  {config.workspace}")
     print(f"database:   {config.db_path}")
     print(f"auto_approve: {config.auto_approve}")
-    print(f"web_search: {config.enable_web_search}")
+    print(f"web_search: {config.web_search_available}")
     print(f"self_coding: {config.enable_self_coding}")
     print(f"telegram:   {'configured' if config.telegram_token else 'not set'}")
     problems = config.validate()

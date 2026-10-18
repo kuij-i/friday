@@ -153,7 +153,8 @@ class TelegramFriday:
         trust = self._trust.get(update.effective_chat.id, False)
         await self._reply(
             update,
-            f"model: {self.config.model}\neffort: {self.config.effort}\ntrust: {'ON' if trust else 'off'}"
+            f"provider: {self.config.provider}\nmodel: {self.config.model}\n"
+            f"effort: {self.config.effort}\ntrust: {'ON' if trust else 'off'}"
         )
 
     async def memory_cmd(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
