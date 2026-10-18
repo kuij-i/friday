@@ -50,7 +50,10 @@ class Scheduler:
             except Exception:  # noqa: BLE001 — advance anyway so we don't loop-spam
                 log.exception("failed to deliver reminder #%s", r.get("id"))
             # Advance regardless of delivery success to avoid repeated retries.
-            self.memory.reschedule_or_close(r["id"], r.get("interval"), fired)
+            try:
+                self.memory.reschedule_or_close(r["id"], r.get("interval"), fired, r.get("daily_time"))
+            except Exception:  # noqa: BLE001 — keep going with the other due reminders
+                log.exception("failed to reschedule reminder #%s", r.get("id"))
 
     def start(self) -> None:
         if self._task is None or self._task.done():

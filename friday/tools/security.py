@@ -15,6 +15,7 @@ import socket
 from pathlib import Path
 
 from .base import Risk, Tool, ToolResult
+from .files import resolve_in_workspace
 
 try:
     import psutil
@@ -65,7 +66,7 @@ def make_security_tools(workspace: Path) -> list[Tool]:
 
     def hash_file(path: str, algorithm: str = "sha256") -> ToolResult:
         try:
-            target = (workspace / path).resolve()
+            target = resolve_in_workspace(workspace, path)
             if not target.is_file():
                 return ToolResult(f"No such file: {path}", is_error=True)
             if algorithm not in hashlib.algorithms_available:

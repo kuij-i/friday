@@ -13,6 +13,10 @@ def _git(repo, *args):
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
 
 
+def _out(repo, *args):
+    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+
 def _init_repo(repo):
     repo.mkdir()
     _git(repo, "init", "-q")
@@ -46,8 +50,27 @@ def test_stage_proposal_applies_and_tests(tmp_path):
     )
     report = SelfImprover(repo).stage_proposal(Proposal("tweak", "because", diff))
     assert report["ok"] == "true", report
-    assert report["branch"].startswith("friday/self-improve-")
-    assert "tweaked" in (repo / "hello.py").read_text()
+    branch = report["branch"]
+    assert branch.startswith("friday/self-improve-")
+    # The change is committed on the branch...
+    shown = subprocess.run(["git", "show", f"{branch}:hello.py"], cwd=repo,
+                           capture_output=True, text=True, check=True).stdout
+    assert "tweaked" in shown
+    # ...while the live checkout is untouched: same branch, clean tree, no worktree left.
+    assert _out(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert _out(repo, "status", "--porcelain") == ""
+    assert "tweaked" not in (repo / "hello.py").read_text()
+    assert len(_out(repo, "worktree", "list").splitlines()) == 1
+    assert _out(repo, "diff", "--name-only", f"main..{branch}") == "hello.py"
+
+
+def test_failed_apply_leaves_no_branch(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    report = SelfImprover(repo).stage_proposal(Proposal("bad", "", "not a real diff"))
+    assert report["ok"] == "false"
+    assert "self-improve" not in _out(repo, "branch", "--list")
+    assert _out(repo, "status", "--porcelain") == ""
 
 
 def test_bad_diff_reports_error(tmp_path):

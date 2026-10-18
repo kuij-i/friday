@@ -7,17 +7,32 @@ to your phone.
 """
 from __future__ import annotations
 
+import math
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from ..memory import Memory
+from ..memory import Memory, next_daily_run
 from .base import Risk, Tool, ToolResult
 
 _DAY = 86_400.0
+_MAX_MINUTES = 10 * 365 * 24 * 60  # ten years; beyond that it's almost surely a mistake
 
 
 def _fmt(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _minutes(value, name: str) -> float:
+    """Parse a positive, finite, sane number of minutes or raise ValueError."""
+    try:
+        m = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number.") from None
+    if not math.isfinite(m) or m <= 0:
+        raise ValueError(f"{name} must be a positive number.")
+    if m > _MAX_MINUTES:
+        raise ValueError(f"{name} is too large (max ten years).")
+    return m
 
 
 def make_schedule_tools(memory: Memory, channel: str) -> list[Tool]:
@@ -27,50 +42,49 @@ def make_schedule_tools(memory: Memory, channel: str) -> list[Tool]:
         daily_time: str | None = None,
         repeat_minutes: float | None = None,
     ) -> ToolResult:
-        text = (text or "").strip()
+        text = str(text or "").strip()
         if not text:
             return ToolResult("A reminder needs some text.", is_error=True)
 
         now = time.time()
         interval: float | None = None
+        daily: str | None = None
 
-        if daily_time:
-            try:
-                hh, mm = (int(x) for x in daily_time.strip().split(":"))
-                if not (0 <= hh < 24 and 0 <= mm < 60):
-                    raise ValueError
-            except Exception:
-                return ToolResult("daily_time must be 'HH:MM' (24h).", is_error=True)
-            nxt = datetime.now().replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if nxt.timestamp() <= now:
-                nxt += timedelta(days=1)
-            next_run = nxt.timestamp()
-            interval = _DAY
-        elif delay_minutes is not None:
-            try:
-                d = float(delay_minutes)
-            except (TypeError, ValueError):
-                return ToolResult("delay_minutes must be a number.", is_error=True)
-            if d <= 0:
-                return ToolResult("delay_minutes must be positive.", is_error=True)
-            next_run = now + d * 60
-            if repeat_minutes:
-                interval = max(60.0, float(repeat_minutes) * 60)
-        elif repeat_minutes:
-            try:
-                interval = max(60.0, float(repeat_minutes) * 60)
-            except (TypeError, ValueError):
-                return ToolResult("repeat_minutes must be a number.", is_error=True)
-            next_run = now + interval
+        try:
+            if daily_time:
+                try:
+                    hh, mm = (int(x) for x in str(daily_time).strip().split(":"))
+                    if not (0 <= hh < 24 and 0 <= mm < 60):
+                        raise ValueError
+                except Exception:
+                    return ToolResult("daily_time must be 'HH:MM' (24h).", is_error=True)
+                daily = f"{hh:02d}:{mm:02d}"
+                next_run = next_daily_run(daily, now)
+                interval = _DAY
+            elif delay_minutes is not None:
+                next_run = now + _minutes(delay_minutes, "delay_minutes") * 60
+                if repeat_minutes:
+                    interval = max(60.0, _minutes(repeat_minutes, "repeat_minutes") * 60)
+            elif repeat_minutes:
+                interval = max(60.0, _minutes(repeat_minutes, "repeat_minutes") * 60)
+                next_run = now + interval
+            else:
+                return ToolResult(
+                    "Specify when: delay_minutes, daily_time='HH:MM', or repeat_minutes.",
+                    is_error=True,
+                )
+        except ValueError as e:
+            return ToolResult(str(e), is_error=True)
+
+        rid = memory.add_reminder(channel, text, next_run, interval, daily_time=daily)
+        if daily:
+            kind = f"daily at {daily}"
         else:
-            return ToolResult(
-                "Specify when: delay_minutes, daily_time='HH:MM', or repeat_minutes.",
-                is_error=True,
-            )
-
-        rid = memory.add_reminder(channel, text, next_run, interval)
-        kind = f"every {interval / 60:.0f} min" if interval else "once"
-        return ToolResult(f"Reminder #{rid} set for {_fmt(next_run)} ({kind}): {text}")
+            kind = f"every {interval / 60:.0f} min" if interval else "once"
+        note = ""
+        if not channel.startswith("tg:"):
+            note = "\n(Delivered via the Telegram bot to its owner — the bot must be running.)"
+        return ToolResult(f"Reminder #{rid} set for {_fmt(next_run)} ({kind}): {text}{note}")
 
     def list_reminders() -> ToolResult:
         items = memory.list_reminders(channel)
@@ -78,7 +92,10 @@ def make_schedule_tools(memory: Memory, channel: str) -> list[Tool]:
             return ToolResult("No active reminders.")
         lines = []
         for r in items:
-            kind = f"every {r['interval'] / 60:.0f}m" if r["interval"] else "once"
+            if r.get("daily_time"):
+                kind = f"daily {r['daily_time']}"
+            else:
+                kind = f"every {r['interval'] / 60:.0f}m" if r["interval"] else "once"
             lines.append(f"#{r['id']}  {_fmt(r['next_run'])}  ({kind})  {r['text']}")
         return ToolResult("\n".join(lines))
 
