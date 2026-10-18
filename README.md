@@ -4,8 +4,9 @@ A self-improving personal AI assistant that lives on your machine. Friday cowork
 with you, writes and runs code, helps with defensive/authorized security tasks,
 remembers what matters, and answers from your phone over Telegram.
 
-- **Brain:** Claude (`claude-opus-5-5`) via the Anthropic API, with adaptive
-  thinking and a configurable effort level.
+- **Brain:** your choice of Claude (`claude-opus-5-5`, the default) via the
+  Anthropic API, or an NVIDIA-hosted model (`nvidia/nemotron-3-super-120b-a12b`
+  by default) via NVIDIA's API.
 - **Memory:** a local SQLite store of facts, preferences, conversation history
   and reminders. This is phase-1 self-improvement: Friday gets more useful the
   more you use it.
@@ -19,16 +20,16 @@ remembers what matters, and answers from your phone over Telegram.
 ## How it works
 
 ```
- you ──► CLI ──────┐                       ┌─► tools (files, shell, python,
-                   ├─► Agent ─► Claude API ┤    memory, security, reminders)
- phone ► Telegram ─┘     │  (tool-use loop) └─► web search (server-side)
+ you ──► CLI ──────┐                        ┌─► tools (files, shell, python,
+                   ├─► Agent ─► Claude API  ┤    memory, security, reminders)
+ phone ► Telegram ─┘     │   or NVIDIA API  └─► web search (Claude only)
                          ▼
                    SQLite memory ◄── reminder scheduler (inside the Telegram bridge)
 ```
 
-Each message runs an agentic loop: Claude replies or asks for a tool; Friday
+Each message runs an agentic loop: the model replies or asks for a tool; Friday
 checks the tool's risk level, asks for your approval if needed, runs it, and
-feeds the result back until Claude has a final answer.
+feeds the result back until the model has a final answer.
 
 ## Safety model
 
@@ -49,8 +50,14 @@ Friday runs on *your* machine with *your* permissions, so the guardrails matter:
 
 ## Quick start
 
-You need **Python 3.11+** and an **Anthropic API key** from
-[console.anthropic.com](https://console.anthropic.com/).
+You need **Python 3.11+** and **one** API key:
+
+| Provider | Where to get the key | Put it in `.env` as |
+| --- | --- | --- |
+| Claude (Anthropic) | [console.anthropic.com](https://console.anthropic.com/) → API Keys (needs billing credit) | `ANTHROPIC_API_KEY=sk-ant-...` |
+| NVIDIA | [build.nvidia.com](https://build.nvidia.com/) → sign in → "Get API Key" | `NVIDIA_API_KEY=nvapi-...` |
+
+Friday uses whichever key you set (force one with `FRIDAY_PROVIDER`).
 
 ### Windows (PowerShell)
 
@@ -64,7 +71,7 @@ You need **Python 3.11+** and an **Anthropic API key** from
    .\.venv\Scripts\Activate.ps1
    pip install -r requirements.txt
    copy .env.example .env
-   notepad .env          # set ANTHROPIC_API_KEY
+   notepad .env          # set ANTHROPIC_API_KEY or NVIDIA_API_KEY
    ```
 
 ### macOS / Linux
@@ -75,7 +82,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-nano .env               # set ANTHROPIC_API_KEY
+nano .env               # set ANTHROPIC_API_KEY or NVIDIA_API_KEY
 ```
 
 ### Run it
@@ -162,19 +169,36 @@ against the folder that holds `.env`, so it doesn't matter where you launch from
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | — (required) | your Anthropic API key |
-| `FRIDAY_MODEL` | `claude-opus-5-5` | Claude model |
-| `FRIDAY_EFFORT` | `high` | `low` / `medium` / `high` / `xhigh` / `max` |
+| `ANTHROPIC_API_KEY` | — | Claude key (set this **or** the NVIDIA key) |
+| `NVIDIA_API_KEY` | — | NVIDIA key from build.nvidia.com |
+| `FRIDAY_PROVIDER` | `auto` | `anthropic`, `nvidia`, or `auto` (whichever key is set) |
+| `FRIDAY_MODEL` | provider default | `claude-opus-5-5` / `nvidia/nemotron-3-super-120b-a12b` |
+| `NVIDIA_BASE_URL` | NVIDIA's hosted API | point at a self-hosted NIM instead |
+| `FRIDAY_EFFORT` | `high` | Claude only: `low` / `medium` / `high` / `xhigh` / `max` |
 | `TELEGRAM_BOT_TOKEN` | — | bot token from @BotFather |
 | `TELEGRAM_OWNER_ID` | — | your Telegram user id (locks the bot) |
 | `FRIDAY_AUTO_APPROVE` | `false` | skip approval prompts (not recommended) |
 | `FRIDAY_WORKSPACE` | `./workspace` | the only folder file tools may touch |
 | `FRIDAY_DB` | `./data/friday.db` | memory database |
-| `FRIDAY_WEB_SEARCH` | `true` | enable Claude's web search |
+| `FRIDAY_WEB_SEARCH` | `true` | enable Claude's web search (not available on NVIDIA) |
 | `FRIDAY_WEB_SEARCH_MAX_USES` | `5` | searches allowed per request |
 | `FRIDAY_WHISPER_MODEL` | `base` | voice model size |
 | `FRIDAY_SELF_CODING` | `false` | enable phase-2 self-coding |
 | `FRIDAY_REPO_ROOT` | `.` | git repo self-coding proposes changes against |
+
+## Using NVIDIA instead of Claude
+
+Set `NVIDIA_API_KEY` (and leave `ANTHROPIC_API_KEY` empty, or set
+`FRIDAY_PROVIDER=nvidia`). Everything else works the same: tools, approvals,
+memory, reminders and Telegram. Differences:
+
+- **Model choice matters.** Friday relies on tool calling, so use a model that
+  supports it. The default `nvidia/nemotron-3-super-120b-a12b` is NVIDIA's
+  agentic model. To try another (for example `moonshotai/kimi-k2.6`), set
+  `FRIDAY_MODEL`; if that model can't call tools, Friday tells you so.
+- **No web search** — that's a Claude server-side feature.
+- **`FRIDAY_EFFORT` is ignored**, and replies are capped at 4096 tokens per
+  step (Friday automatically continues longer answers).
 
 ## Self-coding (phase 2)
 
@@ -207,7 +231,8 @@ friday/
   __main__.py          entrypoint: cli | telegram | doctor | version
   config.py            settings from .env, validated
   memory.py            SQLite memory (facts / preferences / history / reminders)
-  agent.py             Claude tool-use loop + approval gate
+  agent.py             tool-use loop + approval gate
+  providers.py         Claude client, or the NVIDIA (OpenAI-compatible) adapter
   prompts.py           system prompt builder
   tools/               files, shell, python, memory, security, schedule, selfcode
   transcribe.py        optional local speech-to-text for voice notes
@@ -233,7 +258,9 @@ CI runs both on Linux (Python 3.11–3.13), Windows and macOS.
 
 | Symptom | Fix |
 | --- | --- |
-| `config error: ANTHROPIC_API_KEY is not set` | copy `.env.example` to `.env` and paste your key |
+| `config error: No API key set` | copy `.env.example` to `.env` and paste your Claude or NVIDIA key |
+| "NVIDIA rejected the API key" | copy the `nvapi-...` key again from build.nvidia.com |
+| "The model ... doesn't support tool calling" | set `FRIDAY_MODEL` to a tool-calling model (see above) |
 | "My Claude API key was rejected" | the key is wrong or revoked — create a new one in the console |
 | "I couldn't reach the Claude API" | check your internet connection / proxy |
 | "Telegram rejected TELEGRAM_BOT_TOKEN" | copy the token again from @BotFather |

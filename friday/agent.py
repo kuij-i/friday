@@ -19,6 +19,7 @@ import anthropic
 from .config import Config
 from .memory import Memory
 from .prompts import build_system_prompt
+from .providers import ProviderError, make_client
 from .tools import Risk, ToolRegistry, build_registry
 from .tools.base import Approver
 
@@ -56,13 +57,13 @@ class Agent:
         self.approver: Approver = approver or _auto_approver
         self.activity_hook = activity_hook
         # `client` injection point keeps the agent unit-testable without network.
-        self.client = client or anthropic.Anthropic(api_key=config.anthropic_api_key)
+        self.client = client or make_client(config)
         self.registry: ToolRegistry = build_registry(config, memory, channel)
 
     def _tool_params(self) -> list[dict[str, Any]]:
         """Client tools (registry) plus any enabled server-side tools."""
         tools: list[dict[str, Any]] = list(self.registry.api_schemas())
-        if self.config.enable_web_search:
+        if self.config.web_search_available:
             tools.append(
                 {
                     "type": "web_search_20260209",
@@ -139,11 +140,13 @@ class Agent:
         final_text = ""
         try:
             self.memory.log_message(self.channel, "user", user_message)
-            system = build_system_prompt(self.memory, self.channel)
+            system = build_system_prompt(self.memory, self.channel, web_search=self.config.web_search_available)
             messages = self._history_messages(user_message)
             final_text = self._run_loop(system, messages)
         except anthropic.APIStatusError as e:
             final_text = self._api_error_text(e)
+        except ProviderError as e:
+            final_text = str(e)
         except anthropic.APIConnectionError:
             final_text = "I couldn't reach the Claude API — check the network and try again."
         except Exception as e:  # noqa: BLE001 — last-resort guard
