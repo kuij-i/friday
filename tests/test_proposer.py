@@ -20,12 +20,14 @@ def _out(repo, *args):
 def _init_repo(repo):
     repo.mkdir()
     _git(repo, "init", "-q")
+    _git(repo, "config", "core.autocrlf", "false")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "Test")
     _git(repo, "checkout", "-q", "-b", "main")
-    (repo / "hello.py").write_text("def greet():\n    return 'hi'\n")
-    (repo / "test_hello.py").write_text(
-        "from hello import greet\n\n\ndef test_greet():\n    assert greet() == 'hi'\n"
+    # write_bytes, not write_text: keep LF endings on Windows so the diff applies.
+    (repo / "hello.py").write_bytes(b"def greet():\n    return 'hi'\n")
+    (repo / "test_hello.py").write_bytes(
+        b"from hello import greet\n\n\ndef test_greet():\n    assert greet() == 'hi'\n"
     )
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "init")

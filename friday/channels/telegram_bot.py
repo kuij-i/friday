@@ -20,8 +20,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from telegram import Update
+from telegram import Bot, Update
 from telegram.constants import ChatAction
+from telegram.error import InvalidToken, NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -40,6 +41,15 @@ from ..transcribe import Transcriber
 log = logging.getLogger("friday.telegram")
 
 _OWNER_SETTING = "telegram_owner_id"
+_COMMANDS = [
+    ("help", "show this list"),
+    ("trust_on", "allow me to write files and run commands"),
+    ("trust_off", "read-only mode (default)"),
+    ("status", "model, effort and trust state"),
+    ("memory", "what I remember"),
+    ("reminders", "list scheduled reminders"),
+    ("reset", "clear this chat's history"),
+]
 _TG_LIMIT = 4000  # Telegram caps messages at 4096 chars; leave headroom
 
 
@@ -117,15 +127,11 @@ class TelegramFriday:
         if not self._authorized(update):
             await self._reply(update, "Not authorized.")
             return
+        lines = "\n".join(f"/{name} — {desc}" for name, desc in _COMMANDS)
         await self._reply(
             update,
-            "Friday here. I can answer, inspect your machine, and help you code.\n\n"
-            "I won't change anything until you turn on trust:\n"
-            "/trust_on — allow me to write files and run commands\n"
-            "/trust_off — read-only mode (default)\n"
-            "/status — show trust state\n"
-            "/memory — what I remember\n"
-            "/reset — clear this chat's history"
+            "Friday here. I can answer, inspect your machine, and help you code.\n"
+            "I won't change anything until you turn on trust.\n\n" + lines,
         )
 
     async def trust_on(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -252,9 +258,15 @@ class TelegramFriday:
         await self._reply(update, f"🎙 heard: {text}")
         await self._respond(update, ctx, text)
 
-    async def _on_startup(self, _app: Application) -> None:
+    async def _on_startup(self, app: Application) -> None:
         self._scheduler = Scheduler(self.memory, self._deliver)
         self._scheduler.start()
+        try:  # populate the "/" menu in the Telegram app; cosmetic, so never fatal
+            from telegram import BotCommand
+
+            await app.bot.set_my_commands([BotCommand(n, d) for n, d in _COMMANDS])
+        except Exception:  # noqa: BLE001
+            log.warning("couldn't register the bot command menu", exc_info=True)
 
     async def _on_shutdown(self, _app: Application) -> None:
         if self._scheduler:
@@ -270,7 +282,7 @@ class TelegramFriday:
             .build()
         )
         self._app = app
-        app.add_handler(CommandHandler("start", self.start))
+        app.add_handler(CommandHandler(["start", "help"], self.start))
         app.add_handler(CommandHandler("trust_on", self.trust_on))
         app.add_handler(CommandHandler("trust_off", self.trust_off))
         app.add_handler(CommandHandler("status", self.status))
@@ -303,18 +315,43 @@ class TelegramFriday:
         await self._reply(update, "\n".join(lines)[:3900])
 
 
-def run_telegram(config: Config) -> None:
-    config.ensure_dirs()
+def run_telegram(config: Config) -> int:
     problems = config.validate()
     if not config.telegram_token:
         problems.append("TELEGRAM_BOT_TOKEN is not set — create a bot with @BotFather.")
     if problems:
         for p in problems:
             print(f"config error: {p}")
-        return
+        print("Run `python run.py doctor` after fixing your .env.")
+        return 1
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    bot = TelegramFriday(config)
-    app = bot.build()
-    print("Friday Telegram bot is running. Press Ctrl+C to stop.")
+    # The HTTP client logs every long-poll request at INFO, which drowns real events.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    try:
+        config.ensure_dirs()
+        bot = TelegramFriday(config)
+        app = bot.build()
+    except Exception as e:  # noqa: BLE001 — unwritable dir, corrupt DB, malformed token
+        print(f"startup error: {e}")
+        return 1
+    try:
+        username = asyncio.run(_check_token(config.telegram_token))
+    except InvalidToken:
+        print("Telegram rejected TELEGRAM_BOT_TOKEN — copy it again from @BotFather.")
+        bot.memory.close()
+        return 1
+    except NetworkError as e:
+        print(f"Couldn't reach Telegram ({e}). Check your internet connection and retry.")
+        bot.memory.close()
+        return 1
+    print(f"Friday is running as @{username}. Message it on Telegram. Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+    return 0
+
+
+async def _check_token(token: str) -> str:
+    """Fail fast with a clear message on a bad token, before PTB's noisy retry loop."""
+    async with Bot(token) as tg:
+        me = await tg.get_me()
+    return me.username or str(me.id)

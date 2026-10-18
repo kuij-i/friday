@@ -1,7 +1,10 @@
 """Regression tests for robustness / safety hardening."""
 import json
+import os
 import time
 from datetime import datetime
+
+import pytest
 
 from friday.agent import _HISTORY_CHAR_BUDGET, Agent
 from friday.channels.cli import _approval_preview
@@ -14,6 +17,8 @@ from friday.tools.schedule import make_schedule_tools
 from friday.tools.security import make_security_tools
 from friday.tools.shell import make_exec_tools
 from tests.fakes import FakeClient, FakeResponse, TextBlock
+
+posix_only = pytest.mark.skipif(os.name == "nt", reason="uses POSIX shell utilities")
 
 
 def tool_map(tools):
@@ -34,7 +39,10 @@ def test_symlink_escape_blocked(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
     (tmp_path / "secret.txt").write_text("s3cret")
-    (ws / "link").symlink_to(tmp_path / "secret.txt")
+    try:
+        (ws / "link").symlink_to(tmp_path / "secret.txt")
+    except OSError:  # Windows without symlink privilege
+        pytest.skip("symlinks not permitted here")
     t = tool_map(make_file_tools(ws))
     assert t["read_file"].handler(path="link").is_error
 
@@ -48,12 +56,40 @@ def test_read_file_large_is_bounded(tmp_path):
 
 
 # ── exec ────────────────────────────────────────────────────────────────
+def test_python_has_no_stdin(tmp_path):
+    t = tool_map(make_exec_tools(tmp_path, timeout=20))
+    r = t["run_python"].handler(code="import sys; print(repr(sys.stdin.read()))")
+    assert "exit code: 0" in r.content and "''" in r.content
+
+
+def test_python_timeout_is_enforced(tmp_path):
+    t = tool_map(make_exec_tools(tmp_path, timeout=2))
+    start = time.monotonic()
+    r = t["run_python"].handler(code="import time; time.sleep(60)")
+    assert r.is_error and "timed out" in r.content
+    assert time.monotonic() - start < 30
+
+
+def test_python_output_is_bounded(tmp_path):
+    t = tool_map(make_exec_tools(tmp_path, timeout=30))
+    r = t["run_python"].handler(code="print('x' * 5_000_000)")
+    assert not r.is_error and len(r.content) < 25_000
+
+
+def test_shell_runs_portably(tmp_path):
+    t = tool_map(make_exec_tools(tmp_path, timeout=30))
+    r = t["run_shell"].handler(command="echo hello")
+    assert not r.is_error and "hello" in r.content
+
+
+@posix_only
 def test_shell_has_no_stdin(tmp_path):
     t = tool_map(make_exec_tools(tmp_path, timeout=10))
     r = t["run_shell"].handler(command="cat")  # would hang forever reading a tty
     assert "exit code: 0" in r.content
 
 
+@posix_only
 def test_shell_timeout_kills_background_children(tmp_path):
     t = tool_map(make_exec_tools(tmp_path, timeout=1))
     start = time.monotonic()
@@ -62,6 +98,7 @@ def test_shell_timeout_kills_background_children(tmp_path):
     assert time.monotonic() - start < 10
 
 
+@posix_only
 def test_shell_output_is_bounded(tmp_path):
     t = tool_map(make_exec_tools(tmp_path, timeout=30))
     r = t["run_shell"].handler(command="yes | head -c 5000000")
