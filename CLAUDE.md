@@ -1,0 +1,52 @@
+# Friday — developer notes
+
+Friday is a personal AI assistant: a Claude-powered agent with persistent
+memory, a gated tool belt, a CLI, and a Telegram bridge (with voice + a
+reminder scheduler). This file orients future work.
+
+## Architecture
+
+- `friday/config.py` — all settings from env/`.env` (`Config`), validated.
+- `friday/memory.py` — thread-safe SQLite store: facts, preferences, messages,
+  reminders. One connection + `RLock`; WAL; input size caps.
+- `friday/agent.py` — the agentic tool-use loop. Injectable `client` for tests.
+  Never raises to the caller: API/tool failures become readable text. Handles
+  `refusal`, `pause_turn`, `max_tokens` continuation, and an iteration cap.
+- `friday/prompts.py` — system prompt (base policy + memory context + channel).
+- `friday/tools/` — each module exposes `make_*_tools(...)` returning `Tool`s
+  with a `Risk` level; `build_registry(config, memory, channel)` assembles them.
+  - `base.py` risk model + registry + `Approver` type.
+  - `files.py` (workspace-sandboxed), `shell.py` (shell/python, DANGEROUS),
+    `memory_tools.py`, `security.py` (local defensive), `schedule.py`,
+    `selfcode.py` (gated by `FRIDAY_SELF_CODING`).
+- `friday/channels/` — `cli.py` (interactive y/N approval) and
+  `telegram_bot.py` (owner-locked, `/trust` gate, voice, scheduler lifecycle).
+- `friday/scheduler.py` — async reminder delivery loop (runs in the bot).
+- `friday/selfimprove/proposer.py` — phase-2 self-coding: stages a diff on a
+  branch, runs tests, never merges.
+
+## Safety invariants (do not regress)
+
+1. Tools with `Risk >= LOW` pass through the `Approver` unless `auto_approve`.
+2. File tools never resolve outside `config.workspace`.
+3. Telegram is owner-locked; side-effecting tools need `/trust_on`.
+4. `agent.send()` must never raise — always returns a string and logs it.
+5. Self-coding never merges automatically; it only stages + tests on a branch.
+
+## Conventions
+
+- Python 3.11+, `from __future__ import annotations` in every module.
+- Keep handlers returning `ToolResult(content, is_error=...)`; never raise out
+  of a tool — the agent surfaces errors as tool results.
+- Default model is `claude-opus-5-5`; do not hardcode model strings elsewhere.
+
+## Dev commands
+
+```bash
+pip install -r requirements.txt && pip install pytest ruff
+python -m pytest -q          # tests (network-free; agent uses a fake client)
+ruff check .                 # lint
+python run.py doctor         # config check
+```
+
+Tests must stay network-free: use `tests/fakes.FakeClient` for the agent.
