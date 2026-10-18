@@ -2,16 +2,23 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]  # PR branches are covered by pull_request; avoids duplicate runs
   pull_request:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13"]
+        include:
+          # Friday's setup guide targets Windows, so run the suite there too.
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
@@ -27,3 +34,23 @@ jobs:
         run: ruff check .
       - name: Test
         run: python -m pytest -q
+      - name: Smoke-test the entrypoints
+        run: |
+          python run.py version
+          python run.py help
+          python -m friday version
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the project and run the console script
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          cd "$RUNNER_TEMP"
+          friday version
+          friday help

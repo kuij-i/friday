@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from rich.console import Console
@@ -9,6 +10,7 @@ from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
 from rich.status import Status
+from rich.text import Text
 
 from ..agent import Agent
 from ..config import Config
@@ -16,6 +18,7 @@ from ..memory import Memory
 from ..tools.base import Risk
 
 console = Console()
+err_console = Console(stderr=True)
 
 # The "thinking..." spinner, paused while an approval prompt is on screen.
 _status: Status | None = None
@@ -52,23 +55,41 @@ def _cli_approver(name: str, tool_input: dict[str, Any], risk: Risk) -> tuple[bo
     return (answer in {"y", "yes"}), "cli prompt"
 
 
-def run_cli(config: Config) -> None:
+_HELP = (
+    "Commands: [bold]/help[/bold], [bold]/exit[/bold], "
+    "[bold]/reset[/bold] (clear this chat's history), "
+    "[bold]/memory[/bold] (show what I remember), "
+    "[bold]/reminders[/bold] (list scheduled reminders)."
+)
+
+
+def _show_activity(name: str, tool_input: dict[str, Any]) -> None:
+    """Show each tool call as it happens, so read-only tools aren't invisible."""
+    summary = json.dumps(tool_input, default=str)
+    if len(summary) > 100:
+        summary = summary[:100] + "…"
+    console.print(Text(f"  → {name} {summary}", style="dim"))
+
+
+def run_cli(config: Config) -> int:
     global _status
-    config.ensure_dirs()
     problems = config.validate()
     if problems:
         for p in problems:
-            console.print(f"[red]config error:[/red] {p}")
-        return
-
-    memory = Memory(config.db_path)
-    agent = Agent(config, memory, channel="cli", approver=_cli_approver)
+            err_console.print(Text.assemble(("config error: ", "red"), p))
+        err_console.print("Run [bold]python run.py doctor[/bold] after fixing your .env.")
+        return 1
+    try:
+        config.ensure_dirs()
+        memory = Memory(config.db_path)
+    except Exception as e:  # noqa: BLE001 — unwritable dir, corrupt DB, ...
+        err_console.print(Text.assemble(("startup error: ", "red"), f"can't open {config.db_path}: {e}"))
+        return 1
+    agent = Agent(config, memory, channel="cli", approver=_cli_approver, activity_hook=_show_activity)
 
     console.print(
         Panel(
-            "[bold cyan]Friday[/bold cyan] is online. Type your message.\n"
-            "Commands: [bold]/exit[/bold], [bold]/reset[/bold] (clear this chat's history), "
-            "[bold]/memory[/bold] (show what I remember).",
+            "[bold cyan]Friday[/bold cyan] is online. Type your message.\n" + _HELP,
             border_style="cyan",
         )
     )
@@ -83,12 +104,8 @@ def run_cli(config: Config) -> None:
                 continue
             if user in {"/exit", "/quit"}:
                 break
-            if user == "/reset":
-                n = memory.clear_channel("cli")
-                console.print(f"[dim]cleared {n} messages[/dim]")
-                continue
-            if user == "/memory":
-                console.print(Panel(memory.context_blob(), title="memory", border_style="magenta"))
+            if user.startswith("/"):
+                _command(user, memory)
                 continue
 
             try:
@@ -104,7 +121,32 @@ def run_cli(config: Config) -> None:
             try:
                 console.print(Markdown(reply))
             except Exception:  # noqa: BLE001 — never let rendering crash the chat
-                console.print(reply)
+                console.print(reply, markup=False)
     finally:
         memory.close()
         console.print("[dim]Friday signing off.[/dim]")
+    return 0
+
+
+def _command(cmd: str, memory: Memory) -> None:
+    """Handle a /command. Stored text is shown as plain Text, never as Rich markup."""
+    name = cmd.split()[0].lower()
+    try:
+        if name == "/reset":
+            n = memory.clear_channel("cli")
+            console.print(f"[dim]cleared {n} messages[/dim]")
+        elif name == "/memory":
+            console.print(Panel(Text(memory.context_blob()), title="memory", border_style="magenta"))
+        elif name == "/reminders":
+            items = memory.list_reminders()
+            if not items:
+                console.print("[dim]No active reminders.[/dim]")
+            for r in items:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["next_run"]))
+                console.print(Text(f"#{r['id']}  {when}  [{r['channel']}]  {r['text']}"))
+        elif name == "/help":
+            console.print(_HELP)
+        else:
+            console.print(Text(f"Unknown command {name}. ", style="yellow") + Text.from_markup(_HELP))
+    except Exception as e:  # noqa: BLE001 — a command must never crash the chat
+        console.print(Text(f"command failed: {e}", style="red"))

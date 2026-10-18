@@ -5,12 +5,52 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-try:
+_PACKAGE_DIR = Path(__file__).resolve().parent
+
+
+def _find_env_file() -> Path | None:
+    """`.env` in the current directory (or a parent), else next to the source checkout."""
+    try:
+        from dotenv import find_dotenv
+    except ImportError:  # dotenv is optional at runtime
+        return None
+    found = find_dotenv(usecwd=True)
+    if found:
+        return Path(found).resolve()
+    checkout_env = _PACKAGE_DIR.parent / ".env"
+    return checkout_env.resolve() if checkout_env.is_file() else None
+
+
+_ENV_FILE = _find_env_file()
+if _ENV_FILE is not None:
     from dotenv import load_dotenv
 
-    load_dotenv()
-except ImportError:  # dotenv is optional at runtime
-    pass
+    load_dotenv(_ENV_FILE)
+
+
+def _project_dir() -> Path:
+    """Base for relative paths in settings, so they don't depend on the launch directory.
+
+    The folder holding `.env` wins; otherwise the source checkout (if Friday is
+    run from one); otherwise the current directory.
+    """
+    if _ENV_FILE is not None:
+        return _ENV_FILE.parent
+    checkout = _PACKAGE_DIR.parent
+    if (checkout / "run.py").is_file():
+        return checkout
+    return Path.cwd()
+
+
+PROJECT_DIR = _project_dir()
+
+
+def _path(env: str, default: str) -> Path:
+    raw = (os.getenv(env) or "").strip() or default
+    p = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if not p.is_absolute():
+        p = PROJECT_DIR / p
+    return p.resolve()
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -29,11 +69,11 @@ def _as_int(value: str | None, default: int | None) -> int | None:
 
 @dataclass
 class Config:
-    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
-    model: str = field(default_factory=lambda: os.getenv("FRIDAY_MODEL", "claude-opus-5-5"))
-    effort: str = field(default_factory=lambda: os.getenv("FRIDAY_EFFORT", "high"))
+    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "").strip())
+    model: str = field(default_factory=lambda: os.getenv("FRIDAY_MODEL", "").strip() or "claude-opus-5-5")
+    effort: str = field(default_factory=lambda: os.getenv("FRIDAY_EFFORT", "").strip().lower() or "high")
 
-    telegram_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
+    telegram_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", "").strip())
     telegram_owner_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_OWNER_ID", "").strip())
 
     auto_approve: bool = field(default_factory=lambda: _as_bool(os.getenv("FRIDAY_AUTO_APPROVE"), False))
@@ -41,9 +81,9 @@ class Config:
     web_search_max_uses: int = field(default_factory=lambda: _as_int(os.getenv("FRIDAY_WEB_SEARCH_MAX_USES"), 5) or 5)
     whisper_model: str = field(default_factory=lambda: os.getenv("FRIDAY_WHISPER_MODEL", "base"))
     enable_self_coding: bool = field(default_factory=lambda: _as_bool(os.getenv("FRIDAY_SELF_CODING"), False))
-    repo_root: Path = field(default_factory=lambda: Path(os.getenv("FRIDAY_REPO_ROOT", ".")).resolve())
-    workspace: Path = field(default_factory=lambda: Path(os.getenv("FRIDAY_WORKSPACE", "./workspace")).resolve())
-    db_path: Path = field(default_factory=lambda: Path(os.getenv("FRIDAY_DB", "./data/friday.db")).resolve())
+    repo_root: Path = field(default_factory=lambda: _path("FRIDAY_REPO_ROOT", "."))
+    workspace: Path = field(default_factory=lambda: _path("FRIDAY_WORKSPACE", "./workspace"))
+    db_path: Path = field(default_factory=lambda: _path("FRIDAY_DB", "./data/friday.db"))
 
     # Max tool-use iterations per user turn (keeps runaway loops bounded).
     max_iterations: int = 40
@@ -56,6 +96,8 @@ class Config:
         problems: list[str] = []
         if not self.anthropic_api_key:
             problems.append("ANTHROPIC_API_KEY is not set (copy .env.example to .env and fill it in).")
+        elif self.anthropic_api_key in {"sk-ant-...", "your-api-key"}:
+            problems.append("ANTHROPIC_API_KEY is still the placeholder from .env.example — paste your real key.")
         if self.effort not in {"low", "medium", "high", "xhigh", "max"}:
             problems.append(f"FRIDAY_EFFORT '{self.effort}' is invalid; use low|medium|high|xhigh|max.")
         if self.telegram_owner_id and not self.telegram_owner_id.lstrip("-").isdigit():

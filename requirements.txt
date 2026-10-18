@@ -1,4 +1,4 @@
-anthropic>=0.69
+anthropic>=1.0,<2
 python-telegram-bot>=21.0
 python-dotenv>=1.0
 rich>=13.7

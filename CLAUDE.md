@@ -6,7 +6,10 @@ reminder scheduler). This file orients future work.
 
 ## Architecture
 
+- `friday/__main__.py` — entrypoint (`cli|telegram|doctor|version`); `run.py`
+  and the `friday` console script are thin shims over it.
 - `friday/config.py` — all settings from env/`.env` (`Config`), validated.
+  Relative paths resolve against the `.env` folder (`PROJECT_DIR`), not the cwd.
 - `friday/memory.py` — thread-safe SQLite store: facts, preferences, messages,
   reminders. One connection + `RLock`; WAL; input size caps.
 - `friday/agent.py` — the agentic tool-use loop. Injectable `client` for tests.
@@ -49,4 +52,6 @@ ruff check .                 # lint
 python run.py doctor         # config check
 ```
 
-Tests must stay network-free: use `tests/fakes.FakeClient` for the agent.
+Tests must stay offline: use `tests/fakes.FakeClient` for the agent, or the
+localhost mock in `tests/test_sdk_roundtrip.py` to exercise the real SDK.
+CI also runs on Windows and macOS — mark POSIX-shell tests with `posix_only`.

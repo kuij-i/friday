@@ -38,20 +38,28 @@ class SelfImprover:
         self.repo_root = Path(repo_root)
 
     def _git(self, *args: str, cwd: Path | None = None, stdin: str | None = None) -> subprocess.CompletedProcess:
+        # Bytes, not text mode: on Windows text mode rewrites "\n" to "\r\n" on
+        # stdin, so a patch no longer matches LF files and `git apply` fails.
+        # core.autocrlf=false keeps the worktree byte-identical to the repo for
+        # the same reason (Git for Windows defaults it to true).
+        argv = ["git", "-c", "core.autocrlf=false", *args]
         try:
-            return subprocess.run(
-                ["git", *args],
+            proc = subprocess.run(
+                argv,
                 cwd=str(cwd or self.repo_root),
-                input=stdin,
+                input=stdin.encode("utf-8") if stdin is not None else None,
                 stdin=None if stdin is not None else subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 timeout=60,
             )
         except (OSError, subprocess.TimeoutExpired) as e:
-            return subprocess.CompletedProcess(["git", *args], 1, "", str(e))
+            return subprocess.CompletedProcess(argv, 1, "", str(e))
+        return subprocess.CompletedProcess(
+            argv,
+            proc.returncode,
+            proc.stdout.decode("utf-8", errors="replace"),
+            proc.stderr.decode("utf-8", errors="replace"),
+        )
 
     def stage_proposal(self, proposal: Proposal) -> dict[str, str]:
         """Commit the proposed diff on a new branch (in a temp worktree) and test it.

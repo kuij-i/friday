@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "friday-assistant"
 version = "0.1.0"
@@ -5,7 +9,7 @@ description = "A self-improving personal AI assistant that lives on your machine
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=0.69",
+    "anthropic>=1.0,<2",
     "python-telegram-bot>=21.0",
     "python-dotenv>=1.0",
     "rich>=13.7",
@@ -17,7 +21,7 @@ voice = ["faster-whisper>=1.0"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
-friday = "run:main"
+friday = "friday.__main__:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
