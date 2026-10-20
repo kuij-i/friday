@@ -148,8 +148,11 @@ class Config:
             problems.append("ANTHROPIC_API_KEY is still the placeholder from .env.example — paste your real key.")
         if self.effort not in {"low", "medium", "high", "xhigh", "max"}:
             problems.append(f"FRIDAY_EFFORT '{self.effort}' is invalid; use low|medium|high|xhigh|max.")
-        if self.telegram_owner_id and not self.telegram_owner_id.lstrip("-").isdigit():
-            problems.append(f"TELEGRAM_OWNER_ID '{self.telegram_owner_id}' must be a numeric Telegram user id.")
+        owner = self.telegram_owner_id
+        if owner and not (owner.isdigit() and int(owner) > 0):
+            problems.append(
+                f"TELEGRAM_OWNER_ID '{owner}' must be your numeric Telegram user id (a positive number)."
+            )
         raw_uses = os.getenv("FRIDAY_WEB_SEARCH_MAX_USES")
         if raw_uses is not None and raw_uses.strip() and _as_int(raw_uses, None) is None:
             problems.append(f"FRIDAY_WEB_SEARCH_MAX_USES '{raw_uses}' is not an integer (using 5).")

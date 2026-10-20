@@ -44,7 +44,11 @@ Friday runs on *your* machine with *your* permissions, so the guardrails matter:
   directory (symlinks pointing out of it are refused). Shell/Python run with your
   account's permissions — that's their point — so only approve what you'd run
   yourself.
-- **Owner-locked Telegram.** Only your Telegram user id may talk to the bot.
+- **Owner-locked Telegram.** Only your Telegram user id may talk to the bot,
+  and only in a private chat (group and channel messages are ignored). The
+  owner comes from `TELEGRAM_OWNER_ID`, or from pairing with a one-time code
+  that is shown only on your computer's terminal — nobody can claim the bot
+  just by messaging it first.
 - **Authorized security only.** Friday helps you harden, audit, and learn on
   systems you own or are authorized to test. It declines to help attack
   systems you don't.
@@ -125,10 +129,23 @@ primes, save it in the workspace and run it"*.
    python run.py telegram
    ```
 
-4. Open your bot in Telegram, send `/start`, and chat.
+4. Open your bot in Telegram (in a private chat), send `/start`, and chat.
+
+**Don't know your id? Pair instead.** Leave `TELEGRAM_OWNER_ID` blank and run
+`python run.py telegram`. The terminal prints a one-time code such as
+`ABCD-EF23` (valid 10 minutes, single use, 5 wrong tries in total). Send
+`/pair ABCD-EF23` to the bot in a private chat. Friday prints
+`Paired with Telegram user <id>. Pin TELEGRAM_OWNER_ID=<id> in .env` — do that.
+Until it's paired, the bot answers every message with "This bot isn't paired"
+and does nothing else. `python run.py doctor` shows the owner status, and
+`python run.py telegram --reset-owner` forgets a paired owner.
+
+Upgrading from an older Friday that let the first chatter claim the bot? That
+stored claim is no longer trusted. The log prints the old id: if it's yours,
+pin it in `.env`; otherwise run `python run.py telegram --reset-owner`.
 
 Telegram commands: `/help`, `/trust_on`, `/trust_off`, `/status`, `/memory`,
-`/reminders`, `/reset`.
+`/reminders`, `/reset`, `/pair <code>`.
 
 ### Reminders & recurring nudges
 
@@ -154,7 +171,8 @@ extra installed, voice notes get an "install this to enable voice" reply.
 ### Keeping Friday running in the background (Windows)
 
 Register the Telegram bridge as a scheduled task that starts at logon and
-restarts if it stops. From the repo root in PowerShell:
+restarts if it stops. The task runs hidden, so set `TELEGRAM_OWNER_ID` in
+`.env` first (the installer refuses otherwise). From the repo root in PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1
@@ -177,7 +195,7 @@ against the folder that holds `.env`, so it doesn't matter where you launch from
 | `NVIDIA_BASE_URL` | NVIDIA's hosted API | point at a self-hosted NIM instead |
 | `FRIDAY_EFFORT` | `high` | Claude only: `low` / `medium` / `high` / `xhigh` / `max` |
 | `TELEGRAM_BOT_TOKEN` | — | bot token from @BotFather |
-| `TELEGRAM_OWNER_ID` | — | your Telegram user id (locks the bot) |
+| `TELEGRAM_OWNER_ID` | — | your Telegram user id (locks the bot); blank = pair with a one-time code |
 | `FRIDAY_AUTO_APPROVE` | `false` | skip approval prompts (not recommended) |
 | `FRIDAY_WORKSPACE` | `./workspace` | the only folder file tools may touch |
 | `FRIDAY_DB` | `./data/friday.db` | memory database |
@@ -266,5 +284,7 @@ CI runs both on Linux (Python 3.11–3.13), Windows and macOS.
 | "I couldn't reach the Claude API" | check your internet connection / proxy |
 | "Telegram rejected TELEGRAM_BOT_TOKEN" | copy the token again from @BotFather |
 | The Telegram bot replies "Not authorized." | set `TELEGRAM_OWNER_ID` to *your* id (from @userinfobot) |
+| The Telegram bot replies "This bot isn't paired" | set `TELEGRAM_OWNER_ID`, or send `/pair <code>` with the code from the terminal |
+| The bot ignores me in a group | by design — talk to it in a private chat |
 | Friday "forgot" everything | it's using a different `FRIDAY_DB`; `python run.py doctor` shows which |
 | `Activate.ps1 cannot be loaded` (Windows) | run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once |

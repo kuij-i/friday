@@ -28,7 +28,8 @@ reminder scheduler). This file orients future work.
     `memory_tools.py`, `security.py` (local defensive), `schedule.py`,
     `selfcode.py` (gated by `FRIDAY_SELF_CODING`).
 - `friday/channels/` — `cli.py` (interactive y/N approval) and
-  `telegram_bot.py` (owner-locked, `/trust` gate, voice, scheduler lifecycle).
+  `telegram_bot.py` (owner-locked, `/pair` pairing mode, `/trust` gate, voice,
+  scheduler lifecycle). `pairing.py` resolves the owner (no `telegram` import).
 - `friday/scheduler.py` — async reminder delivery loop (runs in the bot).
 - `friday/selfimprove/proposer.py` — phase-2 self-coding: stages a diff on a
   branch, runs tests, never merges.
@@ -39,7 +40,12 @@ reminder scheduler). This file orients future work.
    An Agent created without an approver **denies** them (fail closed);
    `FRIDAY_AUTO_APPROVE` is the only switch that skips the gate.
 2. File tools never resolve outside `config.workspace`.
-3. Telegram is owner-locked; side-effecting tools need `/trust_on`.
+3. Telegram is owner-locked. The owner comes only from `TELEGRAM_OWNER_ID` or
+   a local `/pair` code (`channels/pairing.py`: printed to the terminal only,
+   10 min, single use, 5 wrong tries in total) — never from an implicit
+   claim, and a legacy claimed id is never honoured. Only private chats with
+   the owner are served; unauthorised users get a fixed reply that reveals
+   nothing. Side-effecting tools need `/trust_on`.
 4. `agent.send()` must never raise — always returns a string and logs it.
 5. Self-coding never merges automatically; it only stages + tests on a branch.
 

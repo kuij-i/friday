@@ -3,6 +3,7 @@
 Usage:
     python run.py cli        # chat with Friday in this terminal (default)
     python run.py telegram   # run the Telegram bot (talk from your phone)
+    python run.py telegram --reset-owner   # forget a stored Telegram owner
     python run.py doctor     # check configuration
     python run.py version    # print the version
 
@@ -11,6 +12,32 @@ Usage:
 from __future__ import annotations
 
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import Config
+
+
+def _telegram_owner_lines(config: Config) -> list[str]:
+    """Doctor's owner status. Opens the DB only if it already exists."""
+    from .channels.pairing import legacy_claim_message, owner_status_line, resolve_owner
+    from .memory import Memory
+
+    memory = None
+    if config.db_path.exists():
+        try:
+            memory = Memory(config.db_path)
+        except Exception:  # noqa: BLE001 — doctor reports, it doesn't crash
+            memory = None
+    try:
+        status = resolve_owner(config, memory)
+    finally:
+        if memory is not None:
+            memory.close()
+    lines = [owner_status_line(status)]
+    if status.legacy_claim and status.source != "env":
+        lines.append(legacy_claim_message(status.legacy_claim))
+    return lines
 
 
 def doctor() -> int:
@@ -28,6 +55,8 @@ def doctor() -> int:
     print(f"web_search: {config.web_search_available}")
     print(f"self_coding: {config.enable_self_coding}")
     print(f"telegram:   {'configured' if config.telegram_token else 'not set'}")
+    for line in _telegram_owner_lines(config):
+        print(f"            {line}")
     problems = config.validate()
     try:
         config.ensure_dirs()
@@ -51,9 +80,11 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_cli(config)
     if mode == "telegram":
-        from .channels.telegram_bot import run_telegram
+        from .channels.telegram_bot import reset_owner_cli, run_telegram
         from .config import config
 
+        if "--reset-owner" in args[1:]:
+            return reset_owner_cli(config)
         return run_telegram(config)
     if mode == "doctor":
         return doctor()

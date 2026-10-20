@@ -35,3 +35,13 @@ def test_ensure_dirs(tmp_path):
     cfg.db_path = tmp_path / "sub" / "db.sqlite"
     cfg.ensure_dirs()
     assert cfg.workspace.is_dir() and cfg.db_path.parent.is_dir()
+
+
+def test_validate_owner_must_be_a_positive_user_id():
+    cfg = Config()
+    cfg.anthropic_api_key = "x"
+    for bad in ("-100123", "0", "abc"):
+        cfg.telegram_owner_id = bad
+        assert any("TELEGRAM_OWNER_ID" in p for p in cfg.validate())
+    cfg.telegram_owner_id = "12345"
+    assert cfg.validate() == []

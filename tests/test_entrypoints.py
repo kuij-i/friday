@@ -22,6 +22,35 @@ def test_doctor_reports_missing_key(monkeypatch, capsys, tmp_path):
     assert "ANTHROPIC_API_KEY" in capsys.readouterr().out
 
 
+def test_doctor_reports_telegram_owner(monkeypatch, capsys, tmp_path):
+    import friday.config as cfgmod
+    from friday.channels.pairing import PAIRED_SETTING
+    from friday.memory import Memory
+
+    db = tmp_path / "data" / "db.sqlite"
+    monkeypatch.setattr(cfgmod.config, "workspace", tmp_path / "ws")
+    monkeypatch.setattr(cfgmod.config, "db_path", db)
+    monkeypatch.setattr(cfgmod.config, "telegram_owner_id", "")
+    entry.main(["doctor"])
+    assert "owner: NOT SET" in capsys.readouterr().out
+    mem = Memory(db)
+    mem.set_setting(PAIRED_SETTING, "111")
+    mem.close()
+    entry.main(["doctor"])
+    assert "owner: 111 (paired, pin it in .env)" in capsys.readouterr().out
+    monkeypatch.setattr(cfgmod.config, "telegram_owner_id", "5")
+    entry.main(["doctor"])
+    assert "owner: 5 (from .env)" in capsys.readouterr().out
+
+
+def test_telegram_reset_owner_runs_offline(monkeypatch, capsys, tmp_path):
+    import friday.config as cfgmod
+
+    monkeypatch.setattr(cfgmod.config, "db_path", tmp_path / "none.sqlite")
+    assert entry.main(["telegram", "--reset-owner"]) == 0
+    assert "no stored Telegram owner" in capsys.readouterr().out
+
+
 def test_relative_paths_resolve_against_project_dir(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)  # launch directory must not matter
     monkeypatch.setenv("FRIDAY_WORKSPACE", "some/ws")

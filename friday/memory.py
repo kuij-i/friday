@@ -309,6 +309,12 @@ class Memory:
             )
             self._conn.commit()
 
+    def delete_setting(self, key: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
     # ── summary for the system prompt ──────────────────────────────────
     def context_blob(self, max_chars: int = _MAX_CONTEXT_BLOB) -> str:
         """A compact string of what Friday knows, injected into the system prompt.

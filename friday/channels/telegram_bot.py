@@ -1,10 +1,11 @@
 """Telegram bridge — talk to Friday from your iPhone.
 
 Safety model (no interactive approval round-trips over chat):
-  * Only TELEGRAM_OWNER_ID may talk to Friday. If unset, the first user to
-    message the bot claims ownership; the claim is persisted in the memory DB
-    (so a restart doesn't reopen it) and the id is logged for you to pin into
-    your .env.
+  * Only the owner may talk to Friday, and only in a private chat; group and
+    channel updates are ignored (and logged), even from the owner.
+  * The owner is TELEGRAM_OWNER_ID from .env, or someone who sent /pair with
+    the one-time code printed on the local terminal (see pairing.py). There
+    are no implicit claims: until paired, the bot only answers "not paired".
   * Side-effecting tools (write/shell/python/memory-write) only run when the
     chat is in "trust" mode. Toggle with /trust_on and /trust_off. Default off,
     so from your phone Friday answers and inspects freely but won't change
@@ -38,10 +39,20 @@ from ..memory import Memory
 from ..scheduler import Scheduler
 from ..tools.base import Risk
 from ..transcribe import Transcriber
+from .pairing import (
+    PAIRED_SETTING,
+    PairingCode,
+    PairResult,
+    legacy_claim_message,
+    reset_owner,
+    resolve_owner,
+)
 
 log = logging.getLogger("friday.telegram")
 
-_OWNER_SETTING = "telegram_owner_id"
+_NOT_PAIRED = (
+    "This bot isn't paired. Send /pair <code> from the code shown on the computer running Friday."
+)
 _COMMANDS = [
     ("help", "show this list"),
     ("trust_on", "allow me to write files and run commands"),
@@ -50,6 +61,7 @@ _COMMANDS = [
     ("memory", "what I remember"),
     ("reminders", "list scheduled reminders"),
     ("reset", "clear this chat's history"),
+    ("pair", "pair with the code shown on the computer"),
 ]
 _TG_LIMIT = 4000  # Telegram caps messages at 4096 chars; leave headroom
 
@@ -63,14 +75,14 @@ class TelegramFriday:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.memory = Memory(config.db_path)
-        self.owner_id: int | None = None
-        if config.telegram_owner_id:
-            self.owner_id = int(config.telegram_owner_id)
-        else:
-            claimed = self.memory.get_setting(_OWNER_SETTING)
-            if claimed and claimed.lstrip("-").isdigit():
-                self.owner_id = int(claimed)
-                log.info("Using previously claimed owner id %s", claimed)
+        status = resolve_owner(config, self.memory)
+        self.owner_id: int | None = status.owner_id
+        self._pairing: PairingCode | None = None
+        if self.owner_id is None:
+            # Pairing mode: nobody is served until /pair succeeds.
+            if status.legacy_claim:
+                log.warning(legacy_claim_message(status.legacy_claim))
+            self._pairing = PairingCode()
         self._agents: dict[int, Agent] = {}
         self._trust: dict[int, bool] = {}
         self._chat_locks: dict[int, asyncio.Lock] = {}
@@ -79,22 +91,80 @@ class TelegramFriday:
         self._app: Application | None = None
 
     # ── authorization ──────────────────────────────────────────────────
+    def pairing_banner(self) -> str | None:
+        """Text for the local terminal only — never sent over Telegram or logged."""
+        if self._pairing is None:
+            return None
+        return (
+            f"Pairing code: {self._pairing.display} (valid 10 minutes, single use).\n"
+            f"In a private chat with the bot, send:  /pair {self._pairing.display}"
+        )
+
     def _authorized(self, update: Update) -> bool:
+        """True only for the owner, in a private chat."""
         uid = update.effective_user.id if update.effective_user else None
-        if uid is None:
+        chat = update.effective_chat
+        return (
+            self.owner_id is not None
+            and uid == self.owner_id
+            and chat is not None
+            and chat.type == "private"
+        )
+
+    async def _gate(self, update: Update) -> bool:
+        """Authorize an update, replying to rejected private chats.
+
+        Replies never reveal the owner id, the pairing code or config.
+        """
+        uid = update.effective_user.id if update.effective_user else None
+        chat = update.effective_chat
+        if uid is None or chat is None:
+            return False
+        if chat.type != "private":
+            log.warning("Ignored an update from user %s in a %s chat; only private chats are served", uid, chat.type)
             return False
         if self.owner_id is None:
-            self.owner_id = uid
-            try:
-                self.memory.set_setting(_OWNER_SETTING, str(uid))
-            except Exception:  # noqa: BLE001 — still locked for this process
-                log.exception("failed to persist owner claim")
-            log.warning("Ownership claimed by Telegram user id %s — pin TELEGRAM_OWNER_ID=%s in .env", uid, uid)
-            return True
+            await self._reply(update, _NOT_PAIRED)
+            return False
         if uid != self.owner_id:
             log.warning("Rejected Telegram user id %s", uid)
+            await self._reply(update, "Not authorized.")
             return False
         return True
+
+    async def pair(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        uid = update.effective_user.id if update.effective_user else None
+        chat = update.effective_chat
+        if uid is None or chat is None:
+            return
+        if chat.type != "private":
+            log.warning("Ignored /pair from user %s in a %s chat", uid, chat.type)
+            return
+        if self.owner_id is not None:
+            await self._reply(update, "Already paired." if uid == self.owner_id else "Not authorized.")
+            return
+        attempt = " ".join(getattr(ctx, "args", None) or [])
+        if not attempt:
+            await self._reply(update, "Usage: /pair <code> (the code is shown on the computer running Friday).")
+            return
+        result = self._pairing.check(attempt) if self._pairing else PairResult.LOCKED
+        if result is PairResult.OK:
+            self.owner_id = uid
+            self._pairing = None
+            try:
+                self.memory.set_setting(PAIRED_SETTING, str(uid))
+            except Exception:  # noqa: BLE001 — still paired for this process
+                log.exception("failed to persist the paired owner")
+            print(f"Paired with Telegram user {uid}. Pin TELEGRAM_OWNER_ID={uid} in .env", flush=True)
+            self._start_scheduler()
+            await self._reply(update, "Paired — you're the owner of this Friday now. Send /help to begin.")
+            return
+        if result is PairResult.WRONG:
+            log.warning("Wrong pairing code from Telegram user %s", uid)
+        if result in (PairResult.WRONG, PairResult.EXPIRED):
+            await self._reply(update, "That code is wrong or has expired.")
+        else:
+            await self._reply(update, "Pairing is closed. Restart Friday on the computer to get a new code.")
 
     @staticmethod
     async def _reply(update: Update, text: str) -> None:
@@ -125,8 +195,7 @@ class TelegramFriday:
 
     # ── handlers ───────────────────────────────────────────────────────
     async def start(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            await self._reply(update, "Not authorized.")
+        if not await self._gate(update):
             return
         lines = "\n".join(f"/{name} — {desc}" for name, desc in _COMMANDS)
         await self._reply(
@@ -136,19 +205,19 @@ class TelegramFriday:
         )
 
     async def trust_on(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
+        if not await self._gate(update):
             return
         self._trust[update.effective_chat.id] = True
         await self._reply(update, "Trust ON — I can now write files and run commands. Be careful.")
 
     async def trust_off(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
+        if not await self._gate(update):
             return
         self._trust[update.effective_chat.id] = False
         await self._reply(update, "Trust OFF — read-only mode.")
 
     async def status(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
+        if not await self._gate(update):
             return
         trust = self._trust.get(update.effective_chat.id, False)
         await self._reply(
@@ -158,13 +227,13 @@ class TelegramFriday:
         )
 
     async def memory_cmd(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
+        if not await self._gate(update):
             return
         blob = self.memory.context_blob()
         await self._reply(update, blob[:3500] or "(nothing remembered yet)")
 
     async def reset(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
+        if not await self._gate(update):
             return
         n = self.memory.clear_channel(f"tg:{update.effective_chat.id}")
         await self._reply(update, f"Cleared {n} messages.")
@@ -213,23 +282,23 @@ class TelegramFriday:
                 chat_id = int(channel.split(":", 1)[1])
             except (ValueError, IndexError):
                 chat_id = None
+        if self.owner_id is None:
+            raise RuntimeError("Telegram bot isn't paired; not delivering reminders")
         if chat_id is None:
             chat_id = self.owner_id
-        if chat_id is None or self._app is None:
+        if self._app is None:
             raise RuntimeError(f"no Telegram chat to deliver reminder for channel {channel!r}")
         for chunk in _chunks(text):
             await self._app.bot.send_message(chat_id=chat_id, text=chunk)
 
     async def on_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            await self._reply(update, "Not authorized.")
+        if not await self._gate(update):
             return
         msg = update.effective_message
         await self._respond(update, ctx, (msg.text if msg else "") or "")
 
     async def on_voice(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            await self._reply(update, "Not authorized.")
+        if not await self._gate(update):
             return
         if not self._transcriber.available():
             await self._reply(
@@ -260,9 +329,15 @@ class TelegramFriday:
         await self._reply(update, f"🎙 heard: {text}")
         await self._respond(update, ctx, text)
 
+    def _start_scheduler(self) -> None:
+        # Only with an owner: a failed delivery still advances the reminder,
+        # so running unpaired would silently drop one-shot reminders.
+        if self._scheduler is None and self.owner_id is not None:
+            self._scheduler = Scheduler(self.memory, self._deliver)
+            self._scheduler.start()
+
     async def _on_startup(self, app: Application) -> None:
-        self._scheduler = Scheduler(self.memory, self._deliver)
-        self._scheduler.start()
+        self._start_scheduler()
         try:  # populate the "/" menu in the Telegram app; cosmetic, so never fatal
             from telegram import BotCommand
 
@@ -291,6 +366,7 @@ class TelegramFriday:
         app.add_handler(CommandHandler("memory", self.memory_cmd))
         app.add_handler(CommandHandler("reset", self.reset))
         app.add_handler(CommandHandler("reminders", self.reminders_cmd))
+        app.add_handler(CommandHandler("pair", self.pair))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message))
         app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self.on_voice))
         app.add_error_handler(self._on_error)
@@ -300,7 +376,7 @@ class TelegramFriday:
         log.error("telegram handler error", exc_info=ctx.error)
 
     async def reminders_cmd(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
+        if not await self._gate(update):
             return
         items = self.memory.list_reminders(f"tg:{update.effective_chat.id}")
         if not items:
@@ -348,7 +424,33 @@ def run_telegram(config: Config) -> int:
         bot.memory.close()
         return 1
     print(f"Friday is running as @{username}. Message it on Telegram. Press Ctrl+C to stop.")
+    banner = bot.pairing_banner()
+    if banner:
+        print("\nNo Telegram owner is set, so the bot is in PAIRING MODE.\n" + banner, flush=True)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+    return 0
+
+
+def reset_owner_cli(config: Config) -> int:
+    """`python run.py telegram --reset-owner`: forget any stored (paired or legacy) owner."""
+    if not config.db_path.exists():
+        print("No database yet; there is no stored Telegram owner.")
+        return 0
+    try:
+        memory = Memory(config.db_path)
+    except Exception as e:  # noqa: BLE001
+        print(f"Couldn't open the database {config.db_path}: {e}", file=sys.stderr)
+        return 1
+    try:
+        removed = reset_owner(memory)
+    finally:
+        memory.close()
+    if removed:
+        print("Cleared the stored Telegram owner. Next start will ask you to pair.")
+    else:
+        print("No stored Telegram owner to clear.")
+    if config.telegram_owner_id:
+        print(f"Note: TELEGRAM_OWNER_ID={config.telegram_owner_id} in .env still sets the owner.")
     return 0
 
 
