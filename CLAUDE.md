@@ -18,7 +18,9 @@ reminder scheduler). This file orients future work.
 - `friday/providers.py` — `make_client(config)`: the Anthropic client, or
   `NvidiaClient`, which mimics `client.messages.create` and translates to
   NVIDIA's OpenAI-compatible chat API (raises `ProviderError` with user text).
-- `friday/prompts.py` — system prompt (base policy + memory context + channel).
+- `friday/prompts.py` — system prompt (base policy + memory context + channel
+  note). Channels map to a kind via `_channel_kind`: `cli`, or `tg:<chat_id>`
+  (and legacy `telegram`) → Telegram.
 - `friday/tools/` — each module exposes `make_*_tools(...)` returning `Tool`s
   with a `Risk` level; `build_registry(config, memory, channel)` assembles them.
   - `base.py` risk model + registry + `Approver` type.
@@ -34,6 +36,8 @@ reminder scheduler). This file orients future work.
 ## Safety invariants (do not regress)
 
 1. Tools with `Risk >= LOW` pass through the `Approver` unless `auto_approve`.
+   An Agent created without an approver **denies** them (fail closed);
+   `FRIDAY_AUTO_APPROVE` is the only switch that skips the gate.
 2. File tools never resolve outside `config.workspace`.
 3. Telegram is owner-locked; side-effecting tools need `/trust_on`.
 4. `agent.send()` must never raise — always returns a string and logs it.

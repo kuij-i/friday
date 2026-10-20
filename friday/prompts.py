@@ -29,11 +29,23 @@ with the error rather than papering over it.
 """
 
 
+_CHANNEL_NOTES = {
+    "cli": "You are being used from a desktop terminal.",
+    "telegram": "You are being used from Telegram on the user's iPhone — keep replies short.",
+}
+
+
+def _channel_kind(channel: str) -> str:
+    """Map a channel id to its kind: 'cli', 'telegram' (incl. 'tg:<chat_id>') or ''."""
+    if channel == "cli":
+        return "cli"
+    if channel == "telegram" or channel.startswith("tg:"):
+        return "telegram"
+    return ""
+
+
 def build_system_prompt(memory: Memory, channel: str, web_search: bool = True) -> str:
-    channel_note = {
-        "cli": "You are being used from a desktop terminal.",
-        "telegram": "You are being used from Telegram on the user's iPhone — keep replies short.",
-    }.get(channel, "")
+    channel_note = _CHANNEL_NOTES.get(_channel_kind(channel), "")
     base = BASE_SYSTEM.format(
         web=", web search" if web_search else "",
         search=" or a search" if web_search else "",

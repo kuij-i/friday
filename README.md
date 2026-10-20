@@ -38,7 +38,8 @@ Friday runs on *your* machine with *your* permissions, so the guardrails matter:
 - **Approval gate.** Writing files, running shell commands, executing Python and
   changing memory all require approval. In the CLI you get a `y/N` prompt per
   action that always shows dangerous commands in full. In Telegram you must turn
-  on trust (`/trust_on`); it's off by default.
+  on trust (`/trust_on`); it's off by default. A channel with no way to ask
+  you refuses these actions instead of running them.
 - **Workspace sandbox.** File tools can only touch the `FRIDAY_WORKSPACE`
   directory (symlinks pointing out of it are refused). Shell/Python run with your
   account's permissions — that's their point — so only approve what you'd run

@@ -35,10 +35,6 @@ _HISTORY_CHAR_BUDGET = 150_000
 _MAX_TOOL_RESULT = 100_000
 
 
-def _auto_approver(_name: str, _input: dict[str, Any], _risk: Risk) -> tuple[bool, str]:
-    return True, "auto-approved"
-
-
 class Agent:
     """One Agent instance serves one logical conversation (a 'channel')."""
 
@@ -54,11 +50,20 @@ class Agent:
         self.config = config
         self.memory = memory
         self.channel = channel
-        self.approver: Approver = approver or _auto_approver
+        # Fail closed: without an approver, gated tools are denied. Only
+        # FRIDAY_AUTO_APPROVE (checked in _execute_tool) skips the gate.
+        self.approver: Approver = approver or self._deny_without_approver
+        self._warned_no_approver = False
         self.activity_hook = activity_hook
         # `client` injection point keeps the agent unit-testable without network.
         self.client = client or make_client(config)
         self.registry: ToolRegistry = build_registry(config, memory, channel)
+
+    def _deny_without_approver(self, name: str, _input: dict[str, Any], _risk: Risk) -> tuple[bool, str]:
+        if not self._warned_no_approver:
+            self._warned_no_approver = True
+            log.warning("channel %r has no approver; denying gated tool %s", self.channel, name)
+        return False, "no approver configured for this channel"
 
     def _tool_params(self) -> list[dict[str, Any]]:
         """Client tools (registry) plus any enabled server-side tools."""

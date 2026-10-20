@@ -16,7 +16,7 @@ from friday.tools.files import make_file_tools
 from friday.tools.schedule import make_schedule_tools
 from friday.tools.security import make_security_tools
 from friday.tools.shell import make_exec_tools
-from tests.fakes import FakeClient, FakeResponse, TextBlock
+from tests.fakes import FakeClient, FakeResponse, TextBlock, ToolUseBlock
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="uses POSIX shell utilities")
 
@@ -192,15 +192,74 @@ def test_scheduler_reschedules_daily_by_wall_clock(tmp_path):
 
 
 # ── agent ───────────────────────────────────────────────────────────────
-def _agent(tmp_path, responses):
+def _agent(tmp_path, responses, approver=None, **over):
     cfg = Config()
     cfg.anthropic_api_key = "x"
     cfg.workspace = tmp_path / "ws"
     cfg.workspace.mkdir(exist_ok=True)
     cfg.enable_web_search = False
+    for k, v in over.items():
+        setattr(cfg, k, v)
     mem = Memory(tmp_path / "db.sqlite")
     client = FakeClient(responses)
-    return Agent(cfg, mem, client=client), mem, client
+    return Agent(cfg, mem, approver=approver, client=client), mem, client
+
+
+def _tool_results(client):
+    """tool_result blocks the agent fed back to the model, in order."""
+    # Every call shares one growing messages list, so the last call has them all.
+    return [
+        block
+        for m in client.messages.calls[-1]["messages"]
+        if m["role"] == "user" and isinstance(m["content"], list)
+        for block in m["content"]
+    ]
+
+
+def test_agent_without_approver_denies_side_effects(tmp_path, caplog):
+    responses = [
+        FakeResponse([
+            ToolUseBlock("run_shell", {"command": "echo pwned"}, id="t1"),
+            ToolUseBlock("write_file", {"path": "x.txt", "content": "pwned"}, id="t2"),
+        ], "tool_use"),
+        FakeResponse([ToolUseBlock("run_shell", {"command": "echo again"}, id="t3")], "tool_use"),
+        FakeResponse([TextBlock("ok")], "end_turn"),
+    ]
+    agent, mem, client = _agent(tmp_path, responses)
+    called = []
+    for name in ("run_shell", "write_file"):
+        agent.registry.get(name).handler = lambda **kw: called.append(kw)
+    with caplog.at_level("WARNING", logger="friday.agent"):
+        assert agent.send("do it") == "ok"
+    assert called == []
+    assert not (tmp_path / "ws" / "x.txt").exists()
+    results = _tool_results(client)
+    assert len(results) == 3
+    assert all(r["is_error"] and "no approver configured" in r["content"] for r in results)
+    assert sum("no approver" in r.message for r in caplog.records) == 1  # warned once
+    mem.close()
+
+
+def test_auto_approve_config_still_bypasses(tmp_path):
+    responses = [
+        FakeResponse([ToolUseBlock("remember", {"topic": "t", "content": "likes tea"})], "tool_use"),
+        FakeResponse([TextBlock("saved")], "end_turn"),
+    ]
+    agent, mem, _ = _agent(tmp_path, responses, auto_approve=True)
+    assert agent.send("remember") == "saved"
+    assert any("likes tea" in f["content"] for f in mem.recall_facts())
+    mem.close()
+
+
+def test_safe_tools_need_no_approver(tmp_path):
+    responses = [
+        FakeResponse([ToolUseBlock("recall", {})], "tool_use"),
+        FakeResponse([TextBlock("done")], "end_turn"),
+    ]
+    agent, mem, client = _agent(tmp_path, responses)
+    assert agent.send("what do you know") == "done"
+    assert not _tool_results(client)[0]["is_error"]
+    mem.close()
 
 
 def test_send_never_raises_on_storage_failure(tmp_path):
