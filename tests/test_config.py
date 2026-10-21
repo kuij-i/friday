@@ -45,3 +45,19 @@ def test_validate_owner_must_be_a_positive_user_id():
         assert any("TELEGRAM_OWNER_ID" in p for p in cfg.validate())
     cfg.telegram_owner_id = "12345"
     assert cfg.validate() == []
+
+
+def test_approval_timeout_and_trust_minutes_are_bounded(monkeypatch):
+    cfg = Config()
+    cfg.anthropic_api_key = "x"
+    assert (cfg.effective_approval_timeout, cfg.effective_trust_minutes) == (120, 15)
+    cfg.telegram_approval_timeout, cfg.trust_minutes = 5, 500
+    problems = cfg.validate()
+    assert any("FRIDAY_TELEGRAM_APPROVAL_TIMEOUT must be between 10 and 900" in p for p in problems)
+    assert any("FRIDAY_TRUST_MINUTES must be between 1 and 120" in p for p in problems)
+    assert (cfg.effective_approval_timeout, cfg.effective_trust_minutes) == (10, 120)  # clamped
+    monkeypatch.setenv("FRIDAY_TRUST_MINUTES", "soon")
+    fresh = Config()
+    fresh.anthropic_api_key = "x"
+    assert fresh.trust_minutes == 15
+    assert any("FRIDAY_TRUST_MINUTES 'soon' is not an integer" in p for p in fresh.validate())

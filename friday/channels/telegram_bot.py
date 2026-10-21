@@ -6,10 +6,12 @@ Safety model (no interactive approval round-trips over chat):
   * The owner is TELEGRAM_OWNER_ID from .env, or someone who sent /pair with
     the one-time code printed on the local terminal (see pairing.py). There
     are no implicit claims: until paired, the bot only answers "not paired".
-  * Side-effecting tools (write/shell/python/memory-write) only run when the
-    chat is in "trust" mode. Toggle with /trust_on and /trust_off. Default off,
-    so from your phone Friday answers and inspects freely but won't change
-    anything on your machine until you say so.
+  * Every side-effecting tool needs a per-action tap on ✅ Approve / ❌ Deny.
+    The request shows the full tool input as plain text and is denied if
+    unanswered within FRIDAY_TELEGRAM_APPROVAL_TIMEOUT (see approvals.py).
+  * /trust_on [minutes] auto-approves only Risk.LOW tools (files, memory,
+    reminders) until it expires. DANGEROUS tools (shell, Python, self-coding)
+    always need a tap. Trust lives in memory only, so a restart clears it.
 """
 from __future__ import annotations
 
@@ -22,11 +24,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from telegram import Bot, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.error import InvalidToken, NetworkError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -34,11 +37,12 @@ from telegram.ext import (
 )
 
 from ..agent import Agent
-from ..config import Config
+from ..config import TRUST_MINUTES_BOUNDS, Config
 from ..memory import Memory
 from ..scheduler import Scheduler
-from ..tools.base import Risk
+from ..tools.base import Risk, approval_preview
 from ..transcribe import Transcriber
+from .approvals import ApprovalBroker
 from .pairing import (
     PAIRED_SETTING,
     PairingCode,
@@ -55,8 +59,8 @@ _NOT_PAIRED = (
 )
 _COMMANDS = [
     ("help", "show this list"),
-    ("trust_on", "allow me to write files and run commands"),
-    ("trust_off", "read-only mode (default)"),
+    ("trust_on", "auto-approve small actions (files, memory, reminders) for N min"),
+    ("trust_off", "ask before every action (default)"),
     ("status", "model, effort and trust state"),
     ("memory", "what I remember"),
     ("reminders", "list scheduled reminders"),
@@ -66,9 +70,9 @@ _COMMANDS = [
 _TG_LIMIT = 4000  # Telegram caps messages at 4096 chars; leave headroom
 
 
-def _chunks(text: str) -> list[str]:
+def _chunks(text: str, limit: int = _TG_LIMIT) -> list[str]:
     text = text or "(no reply)"
-    return [text[i : i + _TG_LIMIT] for i in range(0, len(text), _TG_LIMIT)]
+    return [text[i : i + limit] for i in range(0, len(text), limit)]
 
 
 class TelegramFriday:
@@ -84,7 +88,11 @@ class TelegramFriday:
                 log.warning(legacy_claim_message(status.legacy_claim))
             self._pairing = PairingCode()
         self._agents: dict[int, Agent] = {}
-        self._trust: dict[int, bool] = {}
+        # chat_id -> time.monotonic() deadline; in memory only, never persisted.
+        self._trust_until: dict[int, float] = {}
+        self._approvals = ApprovalBroker(
+            self._post_approval, self._edit_approval, timeout=config.effective_approval_timeout
+        )
         self._chat_locks: dict[int, asyncio.Lock] = {}
         self._transcriber = Transcriber(config.whisper_model)
         self._scheduler: Scheduler | None = None
@@ -178,12 +186,66 @@ class TelegramFriday:
             except Exception:  # noqa: BLE001
                 log.exception("failed to send reply chunk")
 
+    # ── approvals & trust ──────────────────────────────────────────────
+    def _trust_left(self, chat_id: int) -> float:
+        """Seconds of trust left for this chat (0 when off or expired)."""
+        return max(0.0, self._trust_until.get(chat_id, 0.0) - time.monotonic())
+
+    async def _post_approval(
+        self, chat_id: int, approval_id: str, name: str, tool_input: dict[str, Any], risk: Risk
+    ) -> tuple[int, str]:
+        """Send the request as plain text (no parse_mode, so model output can't
+        hide or restyle anything). Long input is split; buttons go on the last part."""
+        if self._app is None:
+            raise RuntimeError("Telegram app isn't running")
+        text = f"Approval needed — {name} ({risk.name})\n\n{approval_preview(tool_input, risk)}"
+        parts = _chunks(text, _TG_LIMIT - 20)
+        if len(parts) > 1:
+            parts = [f"(part {i}/{len(parts)})\n{p}" for i, p in enumerate(parts, 1)]
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve", callback_data=f"ap:{approval_id}"),
+            InlineKeyboardButton("❌ Deny", callback_data=f"dn:{approval_id}"),
+        ]])
+        message = None
+        for i, part in enumerate(parts):
+            last = i == len(parts) - 1
+            message = await self._app.bot.send_message(
+                chat_id=chat_id, text=part, reply_markup=keyboard if last else None
+            )
+        assert message is not None  # parts is never empty
+        return message.message_id, parts[-1]
+
+    async def _edit_approval(self, chat_id: int, message_id: int, text: str) -> None:
+        if self._app is not None:
+            await self._app.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=text, reply_markup=None
+            )
+
+    async def on_callback(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        kind, _, approval_id = (query.data or "").partition(":")
+        user_id = query.from_user.id if query.from_user else None
+        chat = query.message.chat if query.message is not None else None
+        if kind not in {"ap", "dn"}:
+            answer = "Unknown action."
+        elif chat is None or chat.type != "private":
+            log.warning("Ignored an approval tap from user %s outside a private chat", user_id)
+            answer = "Not authorized."
+        else:
+            answer = self._approvals.resolve(approval_id, kind == "ap", user_id, chat.id, self.owner_id)
+        with contextlib.suppress(Exception):
+            await query.answer(answer)
+
     def _agent_for(self, chat_id: int) -> Agent:
         if chat_id not in self._agents:
             def approver(name: str, tool_input: dict[str, Any], risk: Risk) -> tuple[bool, str]:
-                if self.config.auto_approve or self._trust.get(chat_id, False):
+                # FRIDAY_AUTO_APPROVE is handled by the agent before this is called.
+                if risk == Risk.LOW and self._trust_left(chat_id) > 0:
                     return True, "trust mode"
-                return False, "trust mode is off — send /trust_on to allow actions"
+                # LOW without trust, and DANGEROUS always: ask with buttons.
+                return self._approvals.request(chat_id, name, tool_input, risk)
 
             self._agents[chat_id] = Agent(
                 self.config,
@@ -201,29 +263,53 @@ class TelegramFriday:
         await self._reply(
             update,
             "Friday here. I can answer, inspect your machine, and help you code.\n"
-            "I won't change anything until you turn on trust.\n\n" + lines,
+            "I ask before every action with ✅/❌ buttons. Shell, Python and self-coding "
+            "always ask, even in trust mode.\n\n" + lines,
         )
 
-    async def trust_on(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def trust_on(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._gate(update):
             return
-        self._trust[update.effective_chat.id] = True
-        await self._reply(update, "Trust ON — I can now write files and run commands. Be careful.")
+        lo, hi = TRUST_MINUTES_BOUNDS
+        args = getattr(ctx, "args", None) or []
+        minutes = self.config.effective_trust_minutes
+        if args:
+            try:
+                minutes = int(args[0])
+            except ValueError:
+                await self._reply(update, f"Usage: /trust_on [minutes]  ({lo}–{hi}, default {minutes})")
+                return
+        minutes = max(lo, min(hi, minutes))
+        self._trust_until[update.effective_chat.id] = time.monotonic() + minutes * 60
+        await self._reply(
+            update,
+            f"Trust ON for {minutes} min — file writes, memory and reminder changes run without asking. "
+            "Shell, Python and self-coding still ask every time.",
+        )
 
     async def trust_off(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._gate(update):
             return
-        self._trust[update.effective_chat.id] = False
-        await self._reply(update, "Trust OFF — read-only mode.")
+        chat_id = update.effective_chat.id
+        self._trust_until.pop(chat_id, None)
+        cancelled = self._approvals.deny_all(chat_id, "trust turned off")
+        note = f" Cancelled {cancelled} waiting request(s)." if cancelled else ""
+        await self._reply(update, "Trust OFF — I'll ask before every action." + note)
 
     async def status(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._gate(update):
             return
-        trust = self._trust.get(update.effective_chat.id, False)
+        left = self._trust_left(update.effective_chat.id)
+        trust = f"ON for LOW actions — {max(1, round(left / 60))} min left" if left > 0 else "off"
+        if self.config.auto_approve:
+            dangerous = "⚠ AUTO-APPROVE IS ON — nothing asks (FRIDAY_AUTO_APPROVE)"
+        else:
+            dangerous = "always ask"
         await self._reply(
             update,
             f"provider: {self.config.provider}\nmodel: {self.config.model}\n"
-            f"effort: {self.config.effort}\ntrust: {'ON' if trust else 'off'}"
+            f"effort: {self.config.effort}\ntrust: {trust}\ndangerous actions: {dangerous}\n"
+            f"approval timeout: {self._approvals.timeout:.0f}s",
         )
 
     async def memory_cmd(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -235,6 +321,7 @@ class TelegramFriday:
     async def reset(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._gate(update):
             return
+        self._approvals.deny_all(update.effective_chat.id, "chat reset")
         n = self.memory.clear_channel(f"tg:{update.effective_chat.id}")
         await self._reply(update, f"Cleared {n} messages.")
 
@@ -268,6 +355,8 @@ class TelegramFriday:
                 reply = f"Something went wrong: {e}"
             finally:
                 typing.cancel()
+                # Safety net: nothing from this turn may stay waiting.
+                self._approvals.deny_all(chat_id, "turn ended")
         await self._reply(update, reply or "(no reply)")
 
     async def _deliver(self, channel: str, text: str) -> None:
@@ -337,6 +426,7 @@ class TelegramFriday:
             self._scheduler.start()
 
     async def _on_startup(self, app: Application) -> None:
+        self._approvals.loop = asyncio.get_running_loop()
         self._start_scheduler()
         try:  # populate the "/" menu in the Telegram app; cosmetic, so never fatal
             from telegram import BotCommand
@@ -346,6 +436,7 @@ class TelegramFriday:
             log.warning("couldn't register the bot command menu", exc_info=True)
 
     async def _on_shutdown(self, _app: Application) -> None:
+        self._approvals.deny_all(None, "Friday is shutting down")
         if self._scheduler:
             await self._scheduler.stop()
         self.memory.close()
@@ -354,6 +445,9 @@ class TelegramFriday:
         app = (
             Application.builder()
             .token(self.config.telegram_token)
+            # Updates must be handled while a turn waits on an approval tap
+            # (or /trust_off); per-chat locks still serialise normal messages.
+            .concurrent_updates(True)
             .post_init(self._on_startup)
             .post_shutdown(self._on_shutdown)
             .build()
@@ -367,6 +461,7 @@ class TelegramFriday:
         app.add_handler(CommandHandler("reset", self.reset))
         app.add_handler(CommandHandler("reminders", self.reminders_cmd))
         app.add_handler(CommandHandler("pair", self.pair))
+        app.add_handler(CallbackQueryHandler(self.on_callback, pattern=r"^(ap|dn):"))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_message))
         app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self.on_voice))
         app.add_error_handler(self._on_error)

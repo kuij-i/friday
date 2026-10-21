@@ -16,25 +16,13 @@ from ..agent import Agent
 from ..config import Config
 from ..memory import Memory
 from ..tools.base import Risk
+from ..tools.base import approval_preview as _approval_preview
 
 console = Console()
 err_console = Console(stderr=True)
 
 # The "thinking..." spinner, paused while an approval prompt is on screen.
 _status: Status | None = None
-_LOW_PREVIEW = 1500
-
-
-def _approval_preview(tool_input: dict[str, Any], risk: Risk) -> str:
-    # json.dumps escapes control characters, so terminal escape sequences in
-    # the input can't rewrite what the user sees.
-    preview = json.dumps(tool_input, indent=2, default=str)
-    # DANGEROUS actions are always shown in full: approving a command you can
-    # only partly see is not approval. LOW ones (e.g. file contents) may be long.
-    if risk < Risk.DANGEROUS and len(preview) > _LOW_PREVIEW:
-        hidden = len(preview) - _LOW_PREVIEW
-        preview = preview[:_LOW_PREVIEW] + f"\n... ({hidden} more chars not shown)"
-    return preview
 
 
 def _cli_approver(name: str, tool_input: dict[str, Any], risk: Risk) -> tuple[bool, str]:

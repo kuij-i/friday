@@ -51,7 +51,13 @@ def doctor() -> int:
         print(f"effort:     {config.effort}")
     print(f"workspace:  {config.workspace}")
     print(f"database:   {config.db_path}")
-    print(f"auto_approve: {config.auto_approve}")
+    if config.auto_approve:
+        print(
+            "auto_approve: True  ⚠ WARNING: every action — shell commands included — runs "
+            "WITHOUT asking, in the CLI and in Telegram. Set FRIDAY_AUTO_APPROVE=false."
+        )
+    else:
+        print("auto_approve: False")
     print(f"web_search: {config.web_search_available}")
     print(f"self_coding: {config.enable_self_coding}")
     print(f"telegram:   {'configured' if config.telegram_token else 'not set'}")

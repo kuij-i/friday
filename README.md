@@ -36,10 +36,21 @@ feeds the result back until the model has a final answer.
 Friday runs on *your* machine with *your* permissions, so the guardrails matter:
 
 - **Approval gate.** Writing files, running shell commands, executing Python and
-  changing memory all require approval. In the CLI you get a `y/N` prompt per
-  action that always shows dangerous commands in full. In Telegram you must turn
-  on trust (`/trust_on`); it's off by default. A channel with no way to ask
-  you refuses these actions instead of running them.
+  changing memory all require approval, per action. In the CLI you get a `y/N`
+  prompt. In Telegram you get a plain-text card with **✅ Approve / ❌ Deny**
+  buttons; it's denied if you don't answer within 2 minutes. Dangerous commands
+  are always shown in full. A channel with no way to ask you refuses these
+  actions instead of running them.
+- **Limited, expiring trust (Telegram).** `/trust_on [minutes]` (default 15,
+  max 120) lets only *small* actions — file writes, memory and reminder
+  changes — run without asking, until it expires. Shell, Python and
+  self-coding **always** ask. Trust is never saved, so a restart turns it off.
+- **Content is data.** Friday treats web pages, search results, files and
+  command output as information, never as instructions, and tells you when
+  something it read tries to give it orders.
+- **`FRIDAY_AUTO_APPROVE=true` turns all of this off** — every action, shell
+  commands included, runs without asking, in the CLI and in Telegram. Don't
+  use it; `python run.py doctor` prints a warning when it's on.
 - **Workspace sandbox.** File tools can only touch the `FRIDAY_WORKSPACE`
   directory (symlinks pointing out of it are refused). Shell/Python run with your
   account's permissions — that's their point — so only approve what you'd run
@@ -144,8 +155,23 @@ Upgrading from an older Friday that let the first chatter claim the bot? That
 stored claim is no longer trusted. The log prints the old id: if it's yours,
 pin it in `.env`; otherwise run `python run.py telegram --reset-owner`.
 
-Telegram commands: `/help`, `/trust_on`, `/trust_off`, `/status`, `/memory`,
-`/reminders`, `/reset`, `/pair <code>`.
+Telegram commands:
+
+| Command | What it does |
+| --- | --- |
+| `/help` | list the commands |
+| `/trust_on [minutes]` | auto-approve small actions (files, memory, reminders) for N minutes (default 15, max 120) |
+| `/trust_off` | ask before every action again (default); cancels any waiting request |
+| `/status` | model, trust time left, approval timeout |
+| `/memory` | what Friday remembers |
+| `/reminders` | scheduled reminders |
+| `/reset` | clear this chat's history (cancels any waiting request) |
+| `/pair <code>` | pair with the code shown on your computer |
+
+When Friday wants to do something with side effects, it sends you the exact
+tool and input (in full for shell/Python, split over several messages if it's
+long) with ✅/❌ buttons on the last message. Tap one; the card then shows
+Approved, Denied or Expired.
 
 ### Reminders & recurring nudges
 
@@ -196,7 +222,9 @@ against the folder that holds `.env`, so it doesn't matter where you launch from
 | `FRIDAY_EFFORT` | `high` | Claude only: `low` / `medium` / `high` / `xhigh` / `max` |
 | `TELEGRAM_BOT_TOKEN` | — | bot token from @BotFather |
 | `TELEGRAM_OWNER_ID` | — | your Telegram user id (locks the bot); blank = pair with a one-time code |
-| `FRIDAY_AUTO_APPROVE` | `false` | skip approval prompts (not recommended) |
+| `FRIDAY_AUTO_APPROVE` | `false` | ⚠ run **every** action (shell included) without asking — keep it `false` |
+| `FRIDAY_TELEGRAM_APPROVAL_TIMEOUT` | `120` | seconds a Telegram approval waits before it's denied (10–900) |
+| `FRIDAY_TRUST_MINUTES` | `15` | default `/trust_on` length in minutes (1–120) |
 | `FRIDAY_WORKSPACE` | `./workspace` | the only folder file tools may touch |
 | `FRIDAY_DB` | `./data/friday.db` | memory database |
 | `FRIDAY_WEB_SEARCH` | `true` | enable Claude's web search (not available on NVIDIA) |

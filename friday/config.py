@@ -90,6 +90,24 @@ def _as_int(value: str | None, default: int | None) -> int | None:
         return default
 
 
+def _env_int(env: str, default: int) -> int:
+    value = _as_int(os.getenv(env), default)
+    return default if value is None else value
+
+
+# (env var, attribute, default, min, max) for bounded integer settings.
+APPROVAL_TIMEOUT_BOUNDS = (10, 900)
+TRUST_MINUTES_BOUNDS = (1, 120)
+_BOUNDED_INTS = [
+    ("FRIDAY_TELEGRAM_APPROVAL_TIMEOUT", "telegram_approval_timeout", 120, *APPROVAL_TIMEOUT_BOUNDS),
+    ("FRIDAY_TRUST_MINUTES", "trust_minutes", 15, *TRUST_MINUTES_BOUNDS),
+]
+
+
+def _clamp(value: int, bounds: tuple[int, int]) -> int:
+    return max(bounds[0], min(bounds[1], value))
+
+
 @dataclass
 class Config:
     provider: str = field(default_factory=_provider)
@@ -106,6 +124,10 @@ class Config:
     telegram_owner_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_OWNER_ID", "").strip())
 
     auto_approve: bool = field(default_factory=lambda: _as_bool(os.getenv("FRIDAY_AUTO_APPROVE"), False))
+    # Telegram: seconds an approval request waits before it is denied, and the
+    # default length of /trust_on. Use the effective_* properties (clamped).
+    telegram_approval_timeout: int = field(default_factory=lambda: _env_int("FRIDAY_TELEGRAM_APPROVAL_TIMEOUT", 120))
+    trust_minutes: int = field(default_factory=lambda: _env_int("FRIDAY_TRUST_MINUTES", 15))
     enable_web_search: bool = field(default_factory=lambda: _as_bool(os.getenv("FRIDAY_WEB_SEARCH"), True))
     web_search_max_uses: int = field(default_factory=lambda: _as_int(os.getenv("FRIDAY_WEB_SEARCH_MAX_USES"), 5) or 5)
     whisper_model: str = field(default_factory=lambda: os.getenv("FRIDAY_WHISPER_MODEL", "base"))
@@ -125,6 +147,14 @@ class Config:
     def web_search_available(self) -> bool:
         """Web search is Claude's server-side tool; other providers don't have it."""
         return self.enable_web_search and self.provider == "anthropic"
+
+    @property
+    def effective_approval_timeout(self) -> int:
+        return _clamp(self.telegram_approval_timeout, APPROVAL_TIMEOUT_BOUNDS)
+
+    @property
+    def effective_trust_minutes(self) -> int:
+        return _clamp(self.trust_minutes, TRUST_MINUTES_BOUNDS)
 
     def ensure_dirs(self) -> None:
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -158,6 +188,12 @@ class Config:
             problems.append(f"FRIDAY_WEB_SEARCH_MAX_USES '{raw_uses}' is not an integer (using 5).")
         if self.web_search_max_uses < 1:
             problems.append("FRIDAY_WEB_SEARCH_MAX_USES must be at least 1.")
+        for env, attr, default, lo, hi in _BOUNDED_INTS:
+            raw = os.getenv(env)
+            if raw is not None and raw.strip() and _as_int(raw, None) is None:
+                problems.append(f"{env} '{raw}' is not an integer (using {default}).")
+            elif not lo <= getattr(self, attr) <= hi:
+                problems.append(f"{env} must be between {lo} and {hi} (got {getattr(self, attr)}).")
         if self.workspace == Path(self.workspace.anchor):
             problems.append("FRIDAY_WORKSPACE must not be a filesystem root — scope it to a project dir.")
         return problems

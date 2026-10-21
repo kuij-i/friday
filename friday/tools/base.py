@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import enum
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +23,24 @@ class ToolResult:
 # An approver decides whether a DANGEROUS/LOW action may run.
 # Signature: (tool_name, tool_input, risk) -> (approved: bool, reason: str)
 Approver = Callable[[str, dict[str, Any], Risk], "tuple[bool, str]"]
+
+
+_LOW_PREVIEW = 1500
+
+
+def approval_preview(tool_input: dict[str, Any], risk: Risk) -> str:
+    """Tool input as shown to the user before they approve it.
+
+    json.dumps escapes control characters, so terminal escape sequences in the
+    input can't rewrite what the user sees. DANGEROUS actions are always shown
+    in full: approving a command you can only partly see is not approval. LOW
+    ones (e.g. file contents) may be long, so they're cut with a note.
+    """
+    preview = json.dumps(tool_input, indent=2, default=str)
+    if risk < Risk.DANGEROUS and len(preview) > _LOW_PREVIEW:
+        hidden = len(preview) - _LOW_PREVIEW
+        preview = preview[:_LOW_PREVIEW] + f"\n... ({hidden} more chars not shown)"
+    return preview
 
 
 @dataclass

@@ -288,6 +288,12 @@ def test_dangerous_preview_is_never_truncated():
     assert json.loads(preview)["command"] == cmd
 
 
+def test_preview_is_shared_with_telegram():
+    from friday.tools.base import approval_preview
+
+    assert approval_preview is _approval_preview
+
+
 def test_low_preview_may_truncate_but_says_so():
     preview = _approval_preview({"content": "x" * 5_000}, Risk.LOW)
     assert "more chars not shown" in preview
